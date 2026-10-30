@@ -7,6 +7,7 @@ name = "audio-structure-analyzer"
 version = "0.2.0"
 description = "Music structure / beat analysis via all-in-one (harmonix-all)"
 readme = "README.md"
+license = "MIT"
 requires-python = ">=3.9"
 dependencies = [
     "numpy>=1.24",

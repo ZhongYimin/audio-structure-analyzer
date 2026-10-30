@@ -5,6 +5,13 @@ soundfile>=0.12
 sounddevice>=0.4
 matplotlib>=3.7
 
-# 分析后端：HuggingFace all-in-one 音乐结构分析（harmonix-all 模型）
-# 安装：pip install git+https://github.com/CPJKU/all-in-one  （国内可用 ghfast.top 镜像）
-# allin1-infer
+# 分析后端：all-in-one 音乐结构分析（harmonix-all 模型，MIT）
+#
+# 官方包 `allin1`（mir-aidj/all-in-one）依赖 madmom，而 madmom 在 Windows/Python 3.12
+# 需要 C 扩展编译（MSVC + Windows SDK），本机环境缺 SDK 头文件装不上。
+# 因此改用其纯 PyTorch 推理分叉 `all-in-one-infer`（allin1_infer），
+# 用 madmom-infer / demucs-infer 替代需编译的 madmom / NATTEN，
+# 模型权重与算法仍为官方 harmonix-all（MIT），版权归 Taejun Kim & Juhan Nam (KAIST)。
+#
+# 安装：pip install allin1-infer
+#   （或从源码：git clone https://ghfast.top/https://github.com/openmirlab/all-in-one-infer）

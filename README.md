@@ -1,10 +1,16 @@
 # 音频结构分析（all-in-one）
 
-基于 HuggingFace 的 **all-in-one**（`allin1_infer`，harmonix-all 模型）做音乐结构分析：
+基于 HuggingFace 的 **all-in-one**（harmonix-all 模型）做音乐结构分析：
 节拍（beat）、强拍（downbeat）、段落结构（verse/chorus/...）。
 
 all-in-one 用 Demucs 声部分离 + Transformer 逐帧预测，对真实演奏的节奏浮动、
 进鼓/撤鼓等编曲相位变化有强鲁棒性。
+
+## 许可证
+
+本项目 MIT，可商用。分析后端 all-in-one（Taejun Kim & Juhan Nam, KAIST）
+与 Demucs（Meta AI）均为 MIT 许可，模型权重按需下载、不随项目分发。
+详见 [LICENSE](LICENSE) 与 [NOTICE](NOTICE)。
 
 ## 能力
 

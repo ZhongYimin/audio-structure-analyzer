@@ -1,0 +1,29 @@
+NOTICE
+======
+
+本项目（audio-structure-analyzer）的分析能力完全由第三方预训练模型与库提供。
+本项目自身不包含、不重新分发任何模型权重（checkpoint），分析时按需从上游下载。
+
+本项目对以下上游组件致谢，并遵守其各自的 MIT 许可证（详见各自 LICENSE 文件）：
+
+1. All-In-One Music Structure Analyzer
+   - 算法与模型：Taejun Kim & Juhan Nam (KAIST)
+   - 论文：All-In-One Metrical And Functional Structure Analysis With
+     Neighborhood Attentions on Demixed Audio (WASPAA 2023, arXiv:2307.16425)
+   - 上游仓库：https://github.com/mir-aidj/all-in-one
+   - 模型权重：Harmonix 数据集训练的 harmonix-all（8 折集成）
+   - 许可证：MIT
+
+   本项目实际运行时使用的推理实现为 all-in-one-infer（allin1_infer），
+   是上述 MIT 项目的纯 PyTorch 推理分叉（以 madmom-infer / demucs-infer
+   替代需要 C 编译的 madmom / NATTEN），模型权重与算法版权仍归原作者所有。
+
+2. Demucs（声部分离）
+   - 作者：Alexandre Défossez / Meta AI
+   - 论文：Hybrid Spectrogram and Waveform Source Separation (ISMIR 2021)
+   - 许可证：MIT
+
+3. 其他 MIT 许可的依赖（示例，以实际 requirements 为准）：
+   - librosa (ISC)、numpy (BSD)、soundfile (BSD)、sounddevice (MIT) 等
+
+如需商用，仅需保留上述版权声明与许可证文本，无其他限制。
