@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Optional
 
+import numpy as np
+
 from .core import AnalysisResult
 
 
@@ -13,13 +15,16 @@ def plot_sections(
     out_path: Optional[str] = None,
 ) -> None:
     """绘制波形与段落标签色块。"""
-    import librosa
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    y, sr = librosa.load(audio_path, sr=22050, mono=True)
+    # 用框架自己的 load_audio 加载，保证波形时间轴与段落/拍点严格一致
+    # （librosa.load 不裁静音、不响度归一，会与 result 的时间轴错位）
+    from .io.loader import load_audio
+
+    y, sr = load_audio(audio_path)
 
     label_colors = {
         "Ap": "#4c8bf5",
@@ -33,7 +38,7 @@ def plot_sections(
     }
 
     fig, ax = plt.subplots(figsize=(14, 6))
-    t = librosa.times_like(y, sr=sr)
+    t = np.linspace(0, len(y) / sr, len(y))
     ax.plot(t, y, color="#999", linewidth=0.4, alpha=0.8)
     ax.set_xlabel("Time (s)")
     ax.set_ylabel("Amplitude")
