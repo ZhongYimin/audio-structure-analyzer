@@ -1,9 +1,12 @@
-# 运行时依赖（all-in-one 封装 + 播放器）
+# 运行时依赖（all-in-one 封装 + 播放器 + 驱动/OSC 运行时）
 numpy>=1.24
 librosa>=0.10
 soundfile>=0.12
 sounddevice>=0.4
 matplotlib>=3.7
+
+# OSC 运行时（驱动文件分发到效果层）
+python-osc>=1.8
 
 # 分析后端：all-in-one 音乐结构分析（harmonix-all 模型，MIT）
 #
