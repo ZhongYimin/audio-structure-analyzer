@@ -1,0 +1,22 @@
+# 统一换行符，避免 Windows/Linux 混用产生噪声 diff
+* text=auto
+
+# 文本文件统一用 LF 存储
+*.py text eol=lf
+*.md text eol=lf
+*.toml text eol=lf
+*.txt text eol=lf
+*.json text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.gitignore text eol=lf
+*.gitattributes text eol=lf
+
+# 二进制文件不做换行转换
+*.wav binary
+*.mp3 binary
+*.flac binary
+*.npz binary
+*.png binary
+*.jpg binary
+*.jpeg binary

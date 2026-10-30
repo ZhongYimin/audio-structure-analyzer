@@ -1,0 +1,36 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+
+# --- 音频输入（体积大，不入库；用 test_audio/ 下自己的测试曲） ---
+*.mp3
+*.wav
+*.flac
+*.m4a
+*.ogg
+*.wma
+
+# --- 生成的可视化产物 ---
+*.png
+*.jpg
+*.jpeg
+*.pdf
+
+# --- 声部分离缓存（Demucs stems，可重新生成） ---
+.asa_cache/
+
+# --- 测试产物（保留 test_audio/allin1/*.json 参考结果） ---
+test_audio/*.json
+test_audio/beat_alignment.png
+test_audio/guy_contact_structure.png
+test_audio/kick_detection.png
+test_audio/beat_diagnosis.png
+
+.DS_Store
