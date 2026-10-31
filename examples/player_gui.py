@@ -56,6 +56,10 @@ THEME = {
 # 背景图路径（全窗口铺底用）
 MIKU_BG = Path(__file__).resolve().parent.parent / "assets" / "miku_bg.jpg"
 
+# 字体：英文用 JetBrains Mono，中文回退到微软雅黑（保证中文歌名正常显示）
+MONO_FONT = "JetBrains Mono"
+CJK_FONT = "Microsoft YaHei"
+
 
 def default_song_dir() -> Path:
     if getattr(sys, "frozen", False):
@@ -164,10 +168,10 @@ class PlayerPanel:
         self.sd = sd
 
         plt.rcParams["font.sans-serif"] = [
-            "JetBrains Mono", "Segoe UI", "Consolas", "DejaVu Sans Mono"
+            CJK_FONT, MONO_FONT, "Segoe UI", "Consolas", "DejaVu Sans Mono"
         ]
         plt.rcParams["font.family"] = "sans-serif"
-        plt.rcParams["font.monospace"] = ["JetBrains Mono", "Consolas", "DejaVu Sans Mono"]
+        plt.rcParams["font.monospace"] = [MONO_FONT, "Consolas", "DejaVu Sans Mono"]
         plt.rcParams["axes.unicode_minus"] = False
 
         segments = data["segments"]
@@ -535,7 +539,7 @@ class App:
         """统一 ttk 组件深色赛博主题。"""
         tk = self.tk
         ttk = self.ttk
-        self.root.option_add("*Font", ("JetBrains Mono", 10))
+        self.root.option_add("*Font", (MONO_FONT, 10))
 
         style = ttk.Style(self.root)
         try:
@@ -546,12 +550,15 @@ class App:
         c = THEME
         style.configure(".", background=c["bg"], foreground=c["fg"],
                         fieldbackground=c["panel"], bordercolor=c["border"],
-                        lightcolor=c["bg"], darkcolor=c["bg"], font=("JetBrains Mono", 10))
+                        lightcolor=c["bg"], darkcolor=c["bg"], font=(MONO_FONT, 10))
 
         style.configure("TFrame", background=c["bg"])
         style.configure("TLabel", background=c["bg"], foreground=c["fg"])
         style.configure("Sub.TLabel", background=c["bg"], foreground=c["sub"])
         style.configure("Accent.TLabel", background=c["bg"], foreground=c["accent"])
+        # 中文字体样式：用于显示中文歌名的控件（状态栏等）
+        style.configure("CJK.TLabel", background=c["bg"], foreground=c["fg"], font=(CJK_FONT, 10))
+        style.configure("CJKSub.TLabel", background=c["bg"], foreground=c["sub"], font=(CJK_FONT, 10))
 
         style.configure("TEntry", fieldbackground=c["panel"], foreground=c["fg"],
                         insertcolor=c["fg"], bordercolor=c["border"], padding=4)
@@ -566,12 +573,14 @@ class App:
                         padding=6)
         style.map("Accent.TButton", background=[("active", "#5be6f5")])
 
+        # Treeview 数据列用雅黑（含中文歌名），表头保持 JetBrains Mono
         style.configure("Treeview", background=c["panel"], fieldbackground=c["panel"],
-                        foreground=c["fg"], bordercolor=c["border"], rowheight=24)
+                        foreground=c["fg"], bordercolor=c["border"], rowheight=24,
+                        font=(CJK_FONT, 10))
         style.map("Treeview", background=[("selected", c["select"])],
                   foreground=[("selected", c["accent"])])
         style.configure("Treeview.Heading", background=c["panel2"], foreground=c["accent"],
-                        relief="flat", font=("JetBrains Mono", 10))
+                        relief="flat", font=(MONO_FONT, 10))
 
         style.configure("Vertical.TScrollbar", background=c["panel2"],
                         troughcolor=c["bg"], bordercolor=c["bg"], arrowcolor=c["sub"])
@@ -611,7 +620,7 @@ class App:
         self.btn_play.pack(side="left", padx=4)
 
         self.status_var = tk.StringVar(value="Ready")
-        ttk.Label(top, textvariable=self.status_var, style="Sub.TLabel").pack(side="right")
+        ttk.Label(top, textvariable=self.status_var, style="CJKSub.TLabel").pack(side="right")
 
         # ---- 中部：歌曲列表 ----
         mid = ttk.Frame(self.content, padding=(10, 0, 10, 0))
