@@ -11,13 +11,8 @@ from .analyzer import (  # noqa: F401
     analyze,
     load_result,
 )
-from .drive import (  # noqa: F401
-    DriveBeat,
-    analyze_and_save_drive,
-    build_drive_file,
-)
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 __all__ = [
     "HARMONIX_LABELS",
@@ -25,8 +20,5 @@ __all__ = [
     "Segment",
     "analyze",
     "load_result",
-    "DriveBeat",
-    "build_drive_file",
-    "analyze_and_save_drive",
     "__version__",
 ]
