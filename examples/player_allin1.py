@@ -92,7 +92,7 @@ def main() -> int:
     fig, ax = plt.subplots(figsize=(15, 6))
     fig.canvas.manager.set_window_title("all-in-one 结构播放器")
 
-    t = librosa.times_like(y, sr=sr)
+    t = np.arange(len(y)) / sr   # librosa 1.0 的 times_like 有坑，直接用样本索引
     ymax = float(max(abs(y))) if len(y) else 1.0
 
     # 波形

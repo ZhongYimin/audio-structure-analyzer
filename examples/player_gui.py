@@ -175,32 +175,44 @@ class PlayerWindow:
         fig, ax = plt.subplots(figsize=(15, 6))
         fig.canvas.manager.set_window_title(f"all-in-one 播放器 — {self.title}")
 
-        t = librosa.times_like(y, sr=sr)
-        ymax = float(max(abs(y))) if len(y) else 1.0
+        # librosa 1.0 的 times_like 有坑，直接用样本索引算时间
+        ymax = float(np.max(np.abs(y))) if len(y) else 1.0
 
-        ax.plot(t, y, color="#888", linewidth=0.4, alpha=0.8, zorder=1)
+        # 波形降采样显示：整首歌 600 万+ 样本点一次性 plot 会让 TkAgg 卡死，
+        # 降到 ~4000 点视觉无损、绘制快 35 倍
+        WAVE_POINTS = 4000
+        if len(y) > WAVE_POINTS:
+            idx = np.linspace(0, len(y) - 1, WAVE_POINTS).astype(int)
+            y_plot = y[idx]
+            t_plot = idx / sr
+        else:
+            y_plot = y
+            t_plot = np.arange(len(y)) / sr
 
+        # 段落色块放最底层（zorder=1），不遮挡波形
         for i in range(len(segments)):
             color = LABEL_COLORS.get(seg_labels[i], "#cccccc")
-            ax.axvspan(seg_starts[i], seg_ends[i], color=color, alpha=0.22, zorder=2)
+            ax.axvspan(seg_starts[i], seg_ends[i], color=color, alpha=0.18, zorder=1)
             mid = (seg_starts[i] + seg_ends[i]) / 2
             ax.text(mid, ymax * 0.90, seg_labels[i], ha="center", va="center",
-                    fontsize=13, fontweight="bold", color=color, zorder=5)
+                    fontsize=13, fontweight="bold", color=color, zorder=6)
             ax.text(mid, ymax * 0.74, f"{seg_starts[i]:.1f}s", ha="center",
-                    va="center", fontsize=8, color="#555", zorder=5)
+                    va="center", fontsize=8, color="#555", zorder=6)
+
+        # 波形：深色实线（已降采样，绘制流畅）
+        ax.plot(t_plot, y_plot, color="#2b2b2b", linewidth=0.7, alpha=1.0, zorder=2)
 
         for b in beats:
-            ax.axvline(b, color="#999", linewidth=0.3, alpha=0.25, ymin=0.04, ymax=0.12, zorder=3)
+            ax.axvline(b, color="#999", linewidth=0.3, alpha=0.25, ymin=0.04, ymax=0.12, zorder=4)
         for db in downbeats:
-            ax.axvline(db, color="#e74c3c", linewidth=1.2, alpha=0.65, ymin=0.04, ymax=0.16, zorder=3)
+            ax.axvline(db, color="#e74c3c", linewidth=1.2, alpha=0.65, ymin=0.04, ymax=0.16, zorder=4)
 
-        cursor = ax.axvline(0, color="#000", linewidth=2, alpha=0.9, zorder=10)
-        highlight = ax.axvspan(0, 0, alpha=0.15, facecolor="#000", edgecolor="#000", linewidth=2.5, zorder=4)
-        highlight.set_visible(False)
+        cursor = ax.axvline(0, color="#d62728", linewidth=2, alpha=0.9, zorder=10, animated=True)
 
         info = ax.text(0.02, 0.98, "", transform=ax.transAxes, fontsize=13,
                        fontweight="bold", va="top", color="#111",
-                       bbox=dict(boxstyle="round", fc="white", ec="#ccc", alpha=0.9))
+                       bbox=dict(boxstyle="round", fc="white", ec="#ccc", alpha=0.9),
+                       animated=True)
 
         ax.set_xlim(0, duration)
         ax.set_ylim(-ymax * 1.05, ymax * 1.05)
@@ -214,6 +226,7 @@ class PlayerWindow:
         state = {
             "pos": 0.0, "sample_pos": 0, "playing": False, "stream": None,
             "speed": 1.0, "prev_seg_idx": -1, "prev_beat_idx": -1, "_last_draw": 0.0,
+            "_bg": None, "_blit_ready": False,
         }
 
         def get_seg_idx(pos):
@@ -223,13 +236,9 @@ class PlayerWindow:
             return 0 if pos < seg_starts[0] else len(segments) - 1
 
         def find_beat(pos):
-            bi = -1
-            for i, b in enumerate(beats):
-                if b <= pos:
-                    bi = i
-                else:
-                    break
-            return bi
+            # beats 已排序，二分查找最后一个 <= pos 的索引
+            import bisect
+            return bisect.bisect_right(beats, pos) - 1
 
         def callback(outdata, frames, time_info, status):
             if not state["playing"]:
@@ -258,6 +267,19 @@ class PlayerWindow:
                 )
                 state["stream"].start()
 
+        def _refresh_artists(pos):
+            cursor.set_xdata([pos, pos])
+            idx = get_seg_idx(pos)
+            bi = find_beat(pos)
+            state["prev_seg_idx"] = idx
+            state["prev_beat_idx"] = bi
+            s = segments[idx]
+            pos_label = beat_positions[bi] if 0 <= bi < len(beat_positions) else 0
+            info.set_text(
+                f"时间 {mmss(pos)} / {mmss(duration)}    段落: {s['label']}    "
+                f"拍 {bi+1}/{len(beats)} (第{pos_label}拍)    BPM {bpm}"
+            )
+
         def update():
             if state["playing"] and state["pos"] >= duration:
                 state["pos"] = duration
@@ -266,31 +288,18 @@ class PlayerWindow:
                     state["stream"].stop()
 
             pos = state["pos"]
-            cursor.set_xdata([pos, pos])
+            _refresh_artists(pos)
 
-            idx = get_seg_idx(pos)
-            if idx != state["prev_seg_idx"]:
-                state["prev_seg_idx"] = idx
-
-            highlight.set_visible(True)
-            highlight.set_x(seg_starts[idx])
-            highlight.set_width(seg_ends[idx] - seg_starts[idx])
-
-            bi = find_beat(pos)
-            if bi != state["prev_beat_idx"] and bi >= 0:
-                state["prev_beat_idx"] = bi
-
-            s = segments[idx]
-            pos_label = beat_positions[bi] if 0 <= bi < len(beat_positions) else 0
-            info.set_text(
-                f"时间 {mmss(pos)} / {mmss(duration)}    段落: {s['label']}    "
-                f"拍 {bi+1}/{len(beats)} (第{pos_label}拍)    BPM {bpm}"
-            )
-
-            now = time.perf_counter()
-            if now - state.get("_last_draw", 0.0) >= 0.033:
-                fig.canvas.draw_idle()
-                state["_last_draw"] = now
+            # blit 局部刷新：只重绘游标 + 文本，不重绘背景
+            canvas = fig.canvas
+            if not state["_blit_ready"]:
+                canvas.draw()
+                state["_bg"] = canvas.copy_from_bbox(ax.bbox)
+                state["_blit_ready"] = True
+            canvas.restore_region(state["_bg"])
+            ax.draw_artist(cursor)
+            ax.draw_artist(info)
+            canvas.blit(ax.bbox)
 
         def on_key(event):
             if event.key == " ":
@@ -318,7 +327,14 @@ class PlayerWindow:
                 state["speed"] = max(0.25, state["speed"] - 0.25)
 
         fig.canvas.mpl_connect("key_press_event", on_key)
-        timer = fig.canvas.new_timer(interval=20)
+
+        def _on_resize(event):
+            # 窗口大小变化 → 缓存失效，下次 update 重新画背景
+            state["_blit_ready"] = False
+
+        fig.canvas.mpl_connect("resize_event", _on_resize)
+
+        timer = fig.canvas.new_timer(interval=33)
         timer.add_callback(update)
         timer.start()
 
