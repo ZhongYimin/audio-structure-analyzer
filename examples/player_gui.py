@@ -24,16 +24,16 @@ import numpy as np
 # ---- 常量 ----
 
 LABEL_COLORS = {
-    "start": "#b0b0b0",
-    "end": "#b0b0b0",
-    "intro": "#4c8bf5",
-    "outro": "#4c8bf5",
-    "verse": "#f5a623",
-    "chorus": "#e74c3c",
-    "bridge": "#9b59b6",
-    "break": "#16a085",
-    "inst": "#27ae60",
-    "solo": "#e67e22",
+    "start": "#5f6b7a",
+    "end": "#5f6b7a",
+    "intro": "#39d0e8",
+    "outro": "#39d0e8",
+    "verse": "#5ce1a6",
+    "chorus": "#ff5fa2",
+    "bridge": "#a78bfa",
+    "break": "#f5c84c",
+    "inst": "#2de2b8",
+    "solo": "#ff8a5c",
 }
 
 AUDIO_EXTS = {".wav", ".mp3", ".flac", ".m4a", ".ogg", ".aiff", ".aac"}
@@ -152,9 +152,12 @@ class PlayerWindow:
         import matplotlib.pyplot as plt
         import sounddevice as sd
 
+        # 字体：全部统一用 JetBrains Mono（Rider 默认代码字体），数字/英文/标签一致美观
         plt.rcParams["font.sans-serif"] = [
-            "Microsoft YaHei", "SimHei", "PingFang SC", "Arial Unicode MS"
+            "JetBrains Mono", "Segoe UI", "Consolas", "DejaVu Sans Mono"
         ]
+        plt.rcParams["font.family"] = "sans-serif"
+        plt.rcParams["font.monospace"] = ["JetBrains Mono", "Consolas", "DejaVu Sans Mono"]
         plt.rcParams["axes.unicode_minus"] = False
 
         data = self.data
@@ -167,6 +170,7 @@ class PlayerWindow:
         y, sr = librosa.load(str(self.audio), sr=22050, mono=True)
         duration = len(y) / sr
         y = y.astype(np.float32)
+        ymax = float(np.max(np.abs(y))) if len(y) else 1.0
 
         seg_starts = [s["start"] for s in segments]
         seg_ends = [s["end"] for s in segments]
@@ -175,8 +179,37 @@ class PlayerWindow:
         fig, ax = plt.subplots(figsize=(15, 6))
         fig.canvas.manager.set_window_title(f"all-in-one 播放器 — {self.title}")
 
-        # librosa 1.0 的 times_like 有坑，直接用样本索引算时间
-        ymax = float(np.max(np.abs(y))) if len(y) else 1.0
+        # ---- 赛博青蓝/粉红霓虹主题（适配初音底图） ----
+        BG = "#0d1117"
+        FG = "#e6f1ff"
+        SUB = "#8892a0"
+        GRID = "#1f2937"
+        ACCENT = "#39d0e8"
+        fig.patch.set_facecolor(BG)
+        ax.set_facecolor(BG)
+
+        # 可选背景水印：初音未来画（若 assets/miku_bg.jpg 存在则铺底，低透明度不抢眼）
+        _miku_path = Path(__file__).resolve().parent.parent / "assets" / "miku_bg.jpg"
+        if _miku_path.exists():
+            try:
+                from PIL import Image
+                _im = Image.open(_miku_path).convert("RGB")
+                # 用 ax.imshow 放在坐标区最底层（zorder=0），波形等必然盖在其上
+                ax.imshow(
+                    _im, aspect="auto", zorder=0, alpha=0.28,
+                    extent=[0, duration, -ymax * 1.05, ymax * 1.05],
+                )
+            except Exception:
+                pass
+        for spine in ax.spines.values():
+            spine.set_color("#30363d")
+        ax.tick_params(colors=SUB, labelsize=9)
+        ax.xaxis.label.set_color(SUB)
+        ax.yaxis.label.set_color(SUB)
+        ax.grid(True, axis="x", color=GRID, linewidth=0.6, alpha=0.7)
+        ax.set_axisbelow(True)
+
+        # librosa 1.0 的 times_like 有坑，直接用样本索引算时间（ymax 已在上面定义）
 
         # 波形降采样显示：整首歌 600 万+ 样本点一次性 plot 会让 TkAgg 卡死，
         # 降到 ~4000 点视觉无损、绘制快 35 倍
@@ -189,39 +222,44 @@ class PlayerWindow:
             y_plot = y
             t_plot = np.arange(len(y)) / sr
 
-        # 段落色块放最底层（zorder=1），不遮挡波形
+        # 波形：青白霓虹，浅填充增强层次
+        ax.plot(t_plot, y_plot, color="#7fd6f0", linewidth=0.7, alpha=0.95, zorder=3)
+        ax.fill_between(t_plot, y_plot, 0, color="#39d0e8", alpha=0.12, linewidth=0, zorder=2)
+
+        # 段落色块 + 标签：霓虹低饱和色块，标签置于色块内顶部
         for i in range(len(segments)):
-            color = LABEL_COLORS.get(seg_labels[i], "#cccccc")
-            ax.axvspan(seg_starts[i], seg_ends[i], color=color, alpha=0.18, zorder=1)
+            color = LABEL_COLORS.get(seg_labels[i], "#5f6b7a")
+            ax.axvspan(seg_starts[i], seg_ends[i], color=color, alpha=0.14, zorder=1)
             mid = (seg_starts[i] + seg_ends[i]) / 2
-            ax.text(mid, ymax * 0.90, seg_labels[i], ha="center", va="center",
-                    fontsize=13, fontweight="bold", color=color, zorder=6)
-            ax.text(mid, ymax * 0.74, f"{seg_starts[i]:.1f}s", ha="center",
-                    va="center", fontsize=8, color="#555", zorder=6)
+            ax.text(mid, ymax * 0.88, seg_labels[i], ha="center", va="top",
+                    fontsize=11, color=color, zorder=6)
 
-        # 波形：深色实线（已降采样，绘制流畅）
-        ax.plot(t_plot, y_plot, color="#2b2b2b", linewidth=0.7, alpha=1.0, zorder=2)
-
+        # 拍线：弱拍极淡、强拍青蓝霓虹
         for b in beats:
-            ax.axvline(b, color="#999", linewidth=0.3, alpha=0.25, ymin=0.04, ymax=0.12, zorder=4)
+            ax.axvline(b, color="#8892a0", linewidth=0.5, alpha=0.30, ymin=0.04, ymax=0.12, zorder=2)
         for db in downbeats:
-            ax.axvline(db, color="#e74c3c", linewidth=1.2, alpha=0.65, ymin=0.04, ymax=0.16, zorder=4)
+            ax.axvline(db, color=ACCENT, linewidth=1.6, alpha=0.95, ymin=0.04, ymax=0.16, zorder=2)
 
-        cursor = ax.axvline(0, color="#d62728", linewidth=2, alpha=0.9, zorder=10, animated=True)
+        cursor = ax.axvline(0, color="#ff5fa2", linewidth=2.5, alpha=0.95, zorder=10, animated=True)
 
-        info = ax.text(0.02, 0.98, "", transform=ax.transAxes, fontsize=13,
-                       fontweight="bold", va="top", color="#111",
-                       bbox=dict(boxstyle="round", fc="white", ec="#ccc", alpha=0.9),
+        info = ax.text(0.02, 0.02, "", transform=ax.transAxes, fontsize=11,
+                       va="bottom", color=FG,
+                       fontfamily="monospace",
+                       bbox=dict(boxstyle="round,pad=0.4", fc="#161b22", ec="#30363d", alpha=0.92),
                        animated=True)
 
         ax.set_xlim(0, duration)
         ax.set_ylim(-ymax * 1.05, ymax * 1.05)
-        ax.set_xlabel("时间 (秒)")
-        ax.set_ylabel("振幅")
-        ax.set_title(
-            f"{self.title} — BPM={bpm}  拍={len(beats)}  强拍={len(downbeats)}  "
-            f"[空格]播放/暂停 [←→]快退/快进 [↑↓]变速 [q]退出"
-        )
+        ax.set_xlabel("Time (s)")
+        ax.set_ylabel("Amplitude")
+
+        # 段落标签放到图形标题下方、数据区上方的独立位置（避免与标题行冲突）
+        # 用 fig.text 在标题下方加一行图例式说明，段落色块本身已标注
+        title_text = f"{self.title}   ·   BPM {bpm}"
+        ax.set_title(title_text, color=FG, fontsize=14, pad=14, loc="left")
+        # 操作提示放到右上角，不占用段落标签空间
+        fig.text(0.995, 0.985, "[SPACE] Play/Pause  [←→] Seek  [↑↓] Speed  [Q] Quit",
+                 ha="right", va="top", fontsize=8, color=SUB)
 
         state = {
             "pos": 0.0, "sample_pos": 0, "playing": False, "stream": None,
@@ -276,11 +314,20 @@ class PlayerWindow:
             s = segments[idx]
             pos_label = beat_positions[bi] if 0 <= bi < len(beat_positions) else 0
             info.set_text(
-                f"时间 {mmss(pos)} / {mmss(duration)}    段落: {s['label']}    "
-                f"拍 {bi+1}/{len(beats)} (第{pos_label}拍)    BPM {bpm}"
+                f"TIME {mmss(pos)} / {mmss(duration)}   SEC {s['label'].upper():<6}   "
+                f"BEAT {bi+1}/{len(beats)} (pos {pos_label})   BPM {bpm}"
             )
 
         def update():
+            # 窗口已关闭时跳过（timer 可能在 close 后仍触发一两次）
+            if not hasattr(fig.canvas, "manager") or fig.canvas.manager is None:
+                return
+            try:
+                if not fig.canvas.get_tk_widget().winfo_exists():
+                    return
+            except Exception:
+                return
+
             if state["playing"] and state["pos"] >= duration:
                 state["pos"] = duration
                 state["playing"] = False
