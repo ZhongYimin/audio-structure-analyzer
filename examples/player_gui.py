@@ -1,16 +1,17 @@
-"""all-in-one 结构分析 GUI 播放器（带歌曲选择 + 智能推理）。
+"""all-in-one 结构分析播放器（单窗口：选歌 + 推理 + 播放一体化）。
 
 功能：
 1. 歌曲选择：内置歌曲目录 + 文件对话框选任意音频
 2. 智能推理：若 <音频同目录>/<同名>.json 已存在 → 不显示推理按钮，直接可播放；
    若不存在 → 显示「推理」按钮，后台线程调用 all-in-one 分析并落盘 json。
-3. 可视化播放：波形 + 段落色块 + 强拍/拍线 + 游标（复用 matplotlib 逻辑）。
+3. 可视化播放：波形 + 段落色块 + 强拍/拍线 + 游标（内嵌在同一个 tkinter 窗口）。
 
 推理设备：优先 CUDA，无 GPU 自动回退 CPU（见 auto_device()）。
 """
 
 from __future__ import annotations
 
+import bisect
 import json
 import os
 import sys
@@ -38,34 +39,44 @@ LABEL_COLORS = {
 
 AUDIO_EXTS = {".wav", ".mp3", ".flac", ".m4a", ".ogg", ".aiff", ".aac"}
 
-# 默认歌曲目录：优先 exe 旁边的 songs/，否则项目 test_audio/
+# ---- 赛博主题配色 ----
+THEME = {
+    "bg": "#0d1117",        # 深底
+    "panel": "#161b22",      # 面板
+    "panel2": "#1c2230",     # 次级面板
+    "fg": "#e6f1ff",         # 前景文字
+    "sub": "#8892a0",        # 次级文字
+    "accent": "#39d0e8",     # 青色强调
+    "accent2": "#ff5fa2",    # 粉红强调
+    "grid": "#1f2937",       # 网格线
+    "border": "#30363d",     # 边框
+    "select": "#2d3a4a",     # 选中
+}
+
+# 背景图路径（全窗口铺底用）
+MIKU_BG = Path(__file__).resolve().parent.parent / "assets" / "miku_bg.jpg"
+
+
 def default_song_dir() -> Path:
-    # 打包后：<exe目录>/songs
     if getattr(sys, "frozen", False):
         base = Path(sys.executable).parent
         songs = base / "songs"
-        if songs.is_dir():
-            return songs
-        return base
-    # 开发环境：项目 test_audio
+        return songs if songs.is_dir() else base
     here = Path(__file__).resolve().parent
     ta = here.parent / "test_audio"
     return ta if ta.is_dir() else here
 
 
 def json_path_for(audio: Path) -> Path:
-    """推理结果 json 的约定路径：<音频目录>/<同名>.json（新结果统一落这里）。"""
     return audio.with_suffix(".json")
 
 
 def _candidate_result_paths(audio: Path):
-    """查找结果 json 的所有候选位置（兼容旧的 allin1/ 子目录）。"""
-    yield audio.with_suffix(".json")                       # 同目录
-    yield audio.parent / "allin1" / f"{audio.stem}.json"   # 旧约定：allin1/ 子目录
+    yield audio.with_suffix(".json")
+    yield audio.parent / "allin1" / f"{audio.stem}.json"
 
 
 def find_result(audio: Path) -> Path | None:
-    """返回已存在的结果 json 路径；不存在返回 None。"""
     for p in _candidate_result_paths(audio):
         if p.exists():
             return p
@@ -94,7 +105,6 @@ def mmss(seconds: float) -> str:
 # ---- 推理（后台线程调用） ----
 
 def run_inference(audio: Path, device: str, progress_cb=None, done_cb=None):
-    """在后台线程跑 all-in-one 分析，落盘 json。"""
     from allin1_infer import analyze
 
     def _work():
@@ -105,7 +115,7 @@ def run_inference(audio: Path, device: str, progress_cb=None, done_cb=None):
                 paths=[str(audio)],
                 model="harmonix-all",
                 device=device,
-                multiprocess=False,          # 打包/多线程环境必须 False
+                multiprocess=False,
                 keep_byproducts=False,
             )
             result = results[0] if isinstance(results, list) else results
@@ -135,24 +145,24 @@ def run_inference(audio: Path, device: str, progress_cb=None, done_cb=None):
     return t
 
 
-# ---- 可视化播放窗口（matplotlib） ----
+# ---- 内嵌播放面板（matplotlib canvas 嵌入 tkinter） ----
 
-class PlayerWindow:
-    """独立的 matplotlib 播放窗口，展示一首歌的分析结果并可播放。"""
+class PlayerPanel:
+    """内嵌到 tkinter 的波形播放面板，展示并播放一首歌的分析结果。"""
 
-    def __init__(self, audio: Path, data: dict, title: str = ""):
-        self.audio = audio
-        self.data = data
-        self.title = title or audio.name
-
-    def show(self):
-        import librosa
+    def __init__(self, parent, audio: Path, data: dict, on_status=None):
         import matplotlib
         matplotlib.use("TkAgg")
         import matplotlib.pyplot as plt
+        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
         import sounddevice as sd
 
-        # 字体：全部统一用 JetBrains Mono（Rider 默认代码字体），数字/英文/标签一致美观
+        self.parent = parent
+        self.audio = audio
+        self.data = data
+        self.on_status = on_status
+        self.sd = sd
+
         plt.rcParams["font.sans-serif"] = [
             "JetBrains Mono", "Segoe UI", "Consolas", "DejaVu Sans Mono"
         ]
@@ -160,235 +170,252 @@ class PlayerWindow:
         plt.rcParams["font.monospace"] = ["JetBrains Mono", "Consolas", "DejaVu Sans Mono"]
         plt.rcParams["axes.unicode_minus"] = False
 
-        data = self.data
         segments = data["segments"]
-        beats = data.get("beats", [])
-        downbeats = data.get("downbeats", [])
-        beat_positions = data.get("beat_positions", [])
-        bpm = data.get("bpm", 0)
+        self.beats = data.get("beats", [])
+        self.downbeats = data.get("downbeats", [])
+        self.beat_positions = data.get("beat_positions", [])
+        self.bpm = data.get("bpm", 0)
 
-        y, sr = librosa.load(str(self.audio), sr=22050, mono=True)
-        duration = len(y) / sr
-        y = y.astype(np.float32)
-        ymax = float(np.max(np.abs(y))) if len(y) else 1.0
+        self.y, self.sr = librosa_load(audio)
+        self.duration = len(self.y) / self.sr
+        self.y = self.y.astype(np.float32)
+        self.ymax = float(np.max(np.abs(self.y))) if len(self.y) else 1.0
 
-        seg_starts = [s["start"] for s in segments]
-        seg_ends = [s["end"] for s in segments]
-        seg_labels = [s["label"] for s in segments]
+        self.seg_starts = [s["start"] for s in segments]
+        self.seg_ends = [s["end"] for s in segments]
+        self.seg_labels = [s["label"] for s in segments]
 
-        fig, ax = plt.subplots(figsize=(15, 6))
-        fig.canvas.manager.set_window_title(f"all-in-one 播放器 — {self.title}")
+        self._build_figure()
+        self.canvas = FigureCanvasTkAgg(self.fig, master=parent)
+        self.canvas.get_tk_widget().pack(fill="both", expand=True)
+        self.canvas.draw()
 
-        # ---- 赛博青蓝/粉红霓虹主题（适配初音底图） ----
-        BG = "#0d1117"
-        FG = "#e6f1ff"
-        SUB = "#8892a0"
-        GRID = "#1f2937"
-        ACCENT = "#39d0e8"
-        fig.patch.set_facecolor(BG)
+        # 播放状态
+        self.state = {
+            "pos": 0.0, "sample_pos": 0, "playing": False, "stream": None,
+            "speed": 1.0, "_bg": None, "_blit_ready": False,
+        }
+
+        self._bind_events()
+        self._start_timer()
+
+    def _build_figure(self):
+        import matplotlib.pyplot as plt
+
+        self.fig, self.ax = plt.subplots(figsize=(14, 5), dpi=100)
+        self.fig.patch.set_facecolor(THEME["bg"])
+
+        BG = THEME["bg"]
+        FG = THEME["fg"]
+        SUB = THEME["sub"]
+        GRID = THEME["grid"]
+        ACCENT = THEME["accent"]
+
+        ax = self.ax
         ax.set_facecolor(BG)
 
-        # 可选背景水印：初音未来画（若 assets/miku_bg.jpg 存在则铺底，低透明度不抢眼）
-        _miku_path = Path(__file__).resolve().parent.parent / "assets" / "miku_bg.jpg"
-        if _miku_path.exists():
+        # 初音背景（压暗版），与全窗口背景保持一致，铺满绘图区
+        if MIKU_BG.exists():
             try:
-                from PIL import Image
-                _im = Image.open(_miku_path).convert("RGB")
-                # 用 ax.imshow 放在坐标区最底层（zorder=0），波形等必然盖在其上
+                from PIL import Image, ImageEnhance
+                _im = Image.open(MIKU_BG).convert("RGB")
+                _im = ImageEnhance.Brightness(_im).enhance(0.45)
+                _im = ImageEnhance.Color(_im).enhance(0.85)
                 ax.imshow(
-                    _im, aspect="auto", zorder=0, alpha=0.28,
-                    extent=[0, duration, -ymax * 1.05, ymax * 1.05],
+                    _im, aspect="auto", zorder=0, alpha=1.0,
+                    extent=[0, self.duration, -self.ymax * 1.05, self.ymax * 1.05],
                 )
             except Exception:
                 pass
+
         for spine in ax.spines.values():
-            spine.set_color("#30363d")
+            spine.set_color(THEME["border"])
         ax.tick_params(colors=SUB, labelsize=9)
         ax.xaxis.label.set_color(SUB)
         ax.yaxis.label.set_color(SUB)
         ax.grid(True, axis="x", color=GRID, linewidth=0.6, alpha=0.7)
         ax.set_axisbelow(True)
 
-        # librosa 1.0 的 times_like 有坑，直接用样本索引算时间（ymax 已在上面定义）
-
-        # 波形降采样显示：整首歌 600 万+ 样本点一次性 plot 会让 TkAgg 卡死，
-        # 降到 ~4000 点视觉无损、绘制快 35 倍
+        # 波形降采样
         WAVE_POINTS = 4000
+        y = self.y
         if len(y) > WAVE_POINTS:
             idx = np.linspace(0, len(y) - 1, WAVE_POINTS).astype(int)
             y_plot = y[idx]
-            t_plot = idx / sr
+            t_plot = idx / self.sr
         else:
             y_plot = y
-            t_plot = np.arange(len(y)) / sr
+            t_plot = np.arange(len(y)) / self.sr
 
-        # 波形：青白霓虹，浅填充增强层次
         ax.plot(t_plot, y_plot, color="#7fd6f0", linewidth=0.7, alpha=0.95, zorder=3)
-        ax.fill_between(t_plot, y_plot, 0, color="#39d0e8", alpha=0.12, linewidth=0, zorder=2)
+        ax.fill_between(t_plot, y_plot, 0, color=THEME["accent"], alpha=0.12, linewidth=0, zorder=2)
 
-        # 段落色块 + 标签：霓虹低饱和色块，标签置于色块内顶部
-        for i in range(len(segments)):
-            color = LABEL_COLORS.get(seg_labels[i], "#5f6b7a")
-            ax.axvspan(seg_starts[i], seg_ends[i], color=color, alpha=0.14, zorder=1)
-            mid = (seg_starts[i] + seg_ends[i]) / 2
-            ax.text(mid, ymax * 0.88, seg_labels[i], ha="center", va="top",
+        # 段落色块 + 标签
+        for i in range(len(self.seg_starts)):
+            color = LABEL_COLORS.get(self.seg_labels[i], "#5f6b7a")
+            ax.axvspan(self.seg_starts[i], self.seg_ends[i], color=color, alpha=0.14, zorder=1)
+            mid = (self.seg_starts[i] + self.seg_ends[i]) / 2
+            ax.text(mid, self.ymax * 0.88, self.seg_labels[i], ha="center", va="top",
                     fontsize=11, color=color, zorder=6)
 
-        # 拍线：弱拍极淡、强拍青蓝霓虹
-        for b in beats:
-            ax.axvline(b, color="#8892a0", linewidth=0.5, alpha=0.30, ymin=0.04, ymax=0.12, zorder=2)
-        for db in downbeats:
+        # 拍线
+        for b in self.beats:
+            ax.axvline(b, color=THEME["sub"], linewidth=0.5, alpha=0.30, ymin=0.04, ymax=0.12, zorder=2)
+        for db in self.downbeats:
             ax.axvline(db, color=ACCENT, linewidth=1.6, alpha=0.95, ymin=0.04, ymax=0.16, zorder=2)
 
-        cursor = ax.axvline(0, color="#ff5fa2", linewidth=2.5, alpha=0.95, zorder=10, animated=True)
+        self.cursor = ax.axvline(0, color=THEME["accent2"], linewidth=2.5, alpha=0.95, zorder=10, animated=True)
 
-        info = ax.text(0.02, 0.02, "", transform=ax.transAxes, fontsize=11,
-                       va="bottom", color=FG,
-                       fontfamily="monospace",
-                       bbox=dict(boxstyle="round,pad=0.4", fc="#161b22", ec="#30363d", alpha=0.92),
-                       animated=True)
+        self.info = ax.text(0.02, 0.02, "", transform=ax.transAxes, fontsize=11,
+                            va="bottom", color=FG, fontfamily="monospace",
+                            bbox=dict(boxstyle="round,pad=0.4", fc=THEME["panel"], ec=THEME["border"], alpha=0.92),
+                            animated=True)
 
-        ax.set_xlim(0, duration)
-        ax.set_ylim(-ymax * 1.05, ymax * 1.05)
+        ax.set_xlim(0, self.duration)
+        ax.set_ylim(-self.ymax * 1.05, self.ymax * 1.05)
         ax.set_xlabel("Time (s)")
         ax.set_ylabel("Amplitude")
+        title_text = f"{self.audio.stem}   ·   BPM {self.bpm}"
+        ax.set_title(title_text, color=FG, fontsize=13, pad=12, loc="left")
 
-        # 段落标签放到图形标题下方、数据区上方的独立位置（避免与标题行冲突）
-        # 用 fig.text 在标题下方加一行图例式说明，段落色块本身已标注
-        title_text = f"{self.title}   ·   BPM {bpm}"
-        ax.set_title(title_text, color=FG, fontsize=14, pad=14, loc="left")
-        # 操作提示放到右上角，不占用段落标签空间
-        fig.text(0.995, 0.985, "[SPACE] Play/Pause  [←→] Seek  [↑↓] Speed  [Q] Quit",
-                 ha="right", va="top", fontsize=8, color=SUB)
+    def _bind_events(self):
+        self.canvas.mpl_connect("key_press_event", self._on_key)
+        self.canvas.mpl_connect("resize_event", self._on_resize)
+        # 让 canvas 能接收键盘焦点
+        self.canvas.get_tk_widget().focus_set()
 
-        state = {
-            "pos": 0.0, "sample_pos": 0, "playing": False, "stream": None,
-            "speed": 1.0, "prev_seg_idx": -1, "prev_beat_idx": -1, "_last_draw": 0.0,
-            "_bg": None, "_blit_ready": False,
-        }
+    def _start_timer(self):
+        self.timer = self.fig.canvas.new_timer(interval=33)
+        self.timer.add_callback(self._update)
+        self.timer.start()
 
-        def get_seg_idx(pos):
-            for i in range(len(segments)):
-                if seg_starts[i] <= pos < seg_ends[i]:
-                    return i
-            return 0 if pos < seg_starts[0] else len(segments) - 1
+    def get_seg_idx(self, pos):
+        for i in range(len(self.seg_starts)):
+            if self.seg_starts[i] <= pos < self.seg_ends[i]:
+                return i
+        return 0 if pos < self.seg_starts[0] else len(self.seg_starts) - 1
 
-        def find_beat(pos):
-            # beats 已排序，二分查找最后一个 <= pos 的索引
-            import bisect
-            return bisect.bisect_right(beats, pos) - 1
+    def find_beat(self, pos):
+        return bisect.bisect_right(self.beats, pos) - 1
 
-        def callback(outdata, frames, time_info, status):
-            if not state["playing"]:
-                outdata[:] = 0
-                return
-            i0 = state["sample_pos"]
-            step = int(frames * state["speed"])
-            i1 = i0 + step
-            if i0 >= len(y):
-                outdata[:] = 0
-                state["playing"] = False
-                return
-            seg = y[i0:i1]
-            n = min(frames, len(seg))
-            outdata[:n, 0] = seg[:n]
-            if n < frames:
-                outdata[n:, 0] = 0
-            state["sample_pos"] += step
-            state["pos"] = state["sample_pos"] / sr
+    def _audio_callback(self, outdata, frames, time_info, status):
+        if not self.state["playing"]:
+            outdata[:] = 0
+            return
+        i0 = self.state["sample_pos"]
+        step = int(frames * self.state["speed"])
+        i1 = i0 + step
+        if i0 >= len(self.y):
+            outdata[:] = 0
+            self.state["playing"] = False
+            return
+        seg = self.y[i0:i1]
+        n = min(frames, len(seg))
+        outdata[:n, 0] = seg[:n]
+        if n < frames:
+            outdata[n:, 0] = 0
+        self.state["sample_pos"] += step
+        self.state["pos"] = self.state["sample_pos"] / self.sr
 
-        def ensure_stream():
-            if state["stream"] is None or state["stream"].closed:
-                state["stream"] = sd.OutputStream(
-                    samplerate=sr, channels=1, dtype="float32",
-                    callback=callback, blocksize=2048, latency="low",
-                )
-                state["stream"].start()
-
-        def _refresh_artists(pos):
-            cursor.set_xdata([pos, pos])
-            idx = get_seg_idx(pos)
-            bi = find_beat(pos)
-            state["prev_seg_idx"] = idx
-            state["prev_beat_idx"] = bi
-            s = segments[idx]
-            pos_label = beat_positions[bi] if 0 <= bi < len(beat_positions) else 0
-            info.set_text(
-                f"TIME {mmss(pos)} / {mmss(duration)}   SEC {s['label'].upper():<6}   "
-                f"BEAT {bi+1}/{len(beats)} (pos {pos_label})   BPM {bpm}"
+    def _ensure_stream(self):
+        if self.state["stream"] is None or self.state["stream"].closed:
+            self.state["stream"] = self.sd.OutputStream(
+                samplerate=self.sr, channels=1, dtype="float32",
+                callback=self._audio_callback, blocksize=2048, latency="low",
             )
+            self.state["stream"].start()
 
-        def update():
-            # 窗口已关闭时跳过（timer 可能在 close 后仍触发一两次）
-            if not hasattr(fig.canvas, "manager") or fig.canvas.manager is None:
+    def _refresh_info(self, pos):
+        self.cursor.set_xdata([pos, pos])
+        idx = self.get_seg_idx(pos)
+        bi = self.find_beat(pos)
+        s_label = self.seg_labels[idx]
+        pos_label = self.beat_positions[bi] if 0 <= bi < len(self.beat_positions) else 0
+        self.info.set_text(
+            f"TIME {mmss(pos)} / {mmss(self.duration)}   SEC {s_label.upper():<6}   "
+            f"BEAT {bi+1}/{len(self.beats)} (pos {pos_label})   BPM {self.bpm}"
+        )
+
+    def _update(self):
+        # 窗口已关闭则跳过
+        try:
+            if not self.canvas.get_tk_widget().winfo_exists():
                 return
+        except Exception:
+            return
+
+        if self.state["playing"] and self.state["pos"] >= self.duration:
+            self.state["pos"] = self.duration
+            self.stop()
+
+        pos = self.state["pos"]
+        self._refresh_info(pos)
+
+        canvas = self.canvas
+        if not self.state["_blit_ready"]:
+            canvas.draw()
+            self.state["_bg"] = canvas.copy_from_bbox(self.ax.bbox)
+            self.state["_blit_ready"] = True
+        canvas.restore_region(self.state["_bg"])
+        self.ax.draw_artist(self.cursor)
+        self.ax.draw_artist(self.info)
+        canvas.blit(self.ax.bbox)
+
+    def _on_key(self, event):
+        if event.key == " ":
+            self.toggle_play()
+        elif event.key == "right":
+            self.seek(5)
+        elif event.key == "left":
+            self.seek(-5)
+        elif event.key == "up":
+            self.state["speed"] = min(2.0, self.state["speed"] + 0.25)
+        elif event.key == "down":
+            self.state["speed"] = max(0.25, self.state["speed"] - 0.25)
+
+    def _on_resize(self, event):
+        self.state["_blit_ready"] = False
+
+    # ---- 供外部按钮调用的接口 ----
+    def toggle_play(self):
+        if self.state["playing"]:
+            self.stop()
+        else:
+            self._ensure_stream()
+            self.state["playing"] = True
+            if self.state["stream"].stopped:
+                self.state["stream"].start()
+
+    def seek(self, delta):
+        self.state["pos"] = min(self.duration, max(0, self.state["pos"] + delta))
+        self.state["sample_pos"] = int(self.state["pos"] * self.sr)
+
+    def stop(self):
+        self.state["playing"] = False
+        stream = self.state["stream"]
+        if stream is not None:
             try:
-                if not fig.canvas.get_tk_widget().winfo_exists():
-                    return
+                if not stream.closed:
+                    stream.stop()
+                    stream.close()
             except Exception:
-                return
+                pass
+            self.state["stream"] = None
+        if hasattr(self, "timer"):
+            self.timer.stop()
 
-            if state["playing"] and state["pos"] >= duration:
-                state["pos"] = duration
-                state["playing"] = False
-                if state["stream"] is not None:
-                    state["stream"].stop()
+    def destroy(self):
+        self.stop()
+        try:
+            self.canvas.get_tk_widget().destroy()
+        except Exception:
+            pass
 
-            pos = state["pos"]
-            _refresh_artists(pos)
 
-            # blit 局部刷新：只重绘游标 + 文本，不重绘背景
-            canvas = fig.canvas
-            if not state["_blit_ready"]:
-                canvas.draw()
-                state["_bg"] = canvas.copy_from_bbox(ax.bbox)
-                state["_blit_ready"] = True
-            canvas.restore_region(state["_bg"])
-            ax.draw_artist(cursor)
-            ax.draw_artist(info)
-            canvas.blit(ax.bbox)
-
-        def on_key(event):
-            if event.key == " ":
-                if state["playing"]:
-                    state["playing"] = False
-                    state["stream"].stop()
-                else:
-                    ensure_stream()
-                    state["playing"] = True
-                    if state["stream"].stopped:
-                        state["stream"].start()
-            elif event.key == "right":
-                state["pos"] = min(duration, state["pos"] + 5)
-                state["sample_pos"] = int(state["pos"] * sr)
-                state["prev_beat_idx"] = find_beat(state["pos"])
-            elif event.key == "left":
-                state["pos"] = max(0, state["pos"] - 5)
-                state["sample_pos"] = int(state["pos"] * sr)
-                state["prev_beat_idx"] = find_beat(state["pos"])
-            elif event.key in ("q", "escape"):
-                plt.close(fig)
-            elif event.key == "up":
-                state["speed"] = min(2.0, state["speed"] + 0.25)
-            elif event.key == "down":
-                state["speed"] = max(0.25, state["speed"] - 0.25)
-
-        fig.canvas.mpl_connect("key_press_event", on_key)
-
-        def _on_resize(event):
-            # 窗口大小变化 → 缓存失效，下次 update 重新画背景
-            state["_blit_ready"] = False
-
-        fig.canvas.mpl_connect("resize_event", _on_resize)
-
-        timer = fig.canvas.new_timer(interval=33)
-        timer.add_callback(update)
-        timer.start()
-
-        plt.show()
-        if state["stream"] is not None:
-            state["stream"].stop()
-            state["stream"].close()
+def librosa_load(audio: Path):
+    import librosa
+    y, sr = librosa.load(str(audio), sr=22050, mono=True)
+    return y, sr
 
 
 # ---- GUI 主窗口 ----
@@ -404,60 +431,173 @@ class App:
         self.messagebox = messagebox
 
         self.root = tk.Tk()
-        self.root.title("all-in-one 结构分析播放器")
-        self.root.geometry("720x520")
-        self.root.minsize(560, 420)
+        self.root.title("all-in-one structure analyzer")
+        self.root.geometry("1100x760")
+        self.root.minsize(900, 620)
+        self.root.configure(bg=THEME["bg"])
+
+        self._load_bg_image()
+        self._apply_style()
 
         self.song_dir = default_song_dir()
         self.current_audio: Path | None = None
         self.inferring = False
+        self.panel: PlayerPanel | None = None
+        self._closing = False
 
         self._build_ui()
         self.refresh_songs()
+
+        # 关闭窗口时务必停止音频流，避免后台还在播
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _on_close(self):
+        self._closing = True
+        if self.panel is not None:
+            self.panel.stop()
+        self.root.destroy()
+
+    def _load_bg_image(self):
+        """加载初音背景图并压暗，作为全窗口氛围背景。"""
+        self._bg_photo = None
+        self._bg_img_orig = None
+        try:
+            from PIL import Image, ImageEnhance, ImageTk
+            if MIKU_BG.exists():
+                img = Image.open(MIKU_BG).convert("RGB")
+                # 压暗 + 降饱和，做氛围底，避免与前景文字抢视觉
+                img = ImageEnhance.Brightness(img).enhance(0.45)
+                img = ImageEnhance.Color(img).enhance(0.85)
+                self._bg_img_orig = img
+                self._bg_photo = ImageTk.PhotoImage(img)
+        except Exception:
+            self._bg_photo = None
+            self._bg_img_orig = None
+
+    def _resize_bg(self, event=None):
+        """窗口尺寸变化时重采样背景图铺满内容层。"""
+        if not getattr(self, "_bg_img_orig", None):
+            return
+        try:
+            from PIL import Image, ImageTk
+            w = max(1, self.content.winfo_width())
+            h = max(1, self.content.winfo_height())
+            img = self._bg_img_orig.resize((w, h), Image.Resampling.LANCZOS)
+            self._bg_photo = ImageTk.PhotoImage(img)
+            self.bg_label.configure(image=self._bg_photo)
+        except Exception:
+            pass
+
+    def _apply_style(self):
+        """统一 ttk 组件深色赛博主题。"""
+        tk = self.tk
+        ttk = self.ttk
+        self.root.option_add("*Font", ("JetBrains Mono", 10))
+
+        style = ttk.Style(self.root)
+        try:
+            style.theme_use("clam")
+        except Exception:
+            pass
+
+        c = THEME
+        style.configure(".", background=c["bg"], foreground=c["fg"],
+                        fieldbackground=c["panel"], bordercolor=c["border"],
+                        lightcolor=c["bg"], darkcolor=c["bg"], font=("JetBrains Mono", 10))
+
+        style.configure("TFrame", background=c["bg"])
+        style.configure("TLabel", background=c["bg"], foreground=c["fg"])
+        style.configure("Sub.TLabel", background=c["bg"], foreground=c["sub"])
+        style.configure("Accent.TLabel", background=c["bg"], foreground=c["accent"])
+
+        style.configure("TEntry", fieldbackground=c["panel"], foreground=c["fg"],
+                        insertcolor=c["fg"], bordercolor=c["border"], padding=4)
+
+        style.configure("TButton", background=c["panel2"], foreground=c["fg"],
+                        bordercolor=c["border"], padding=6, relief="flat")
+        style.map("TButton",
+                  background=[("active", c["select"]), ("disabled", c["bg"])],
+                  foreground=[("disabled", c["sub"])])
+
+        style.configure("Accent.TButton", background=c["accent"], foreground=c["bg"],
+                        padding=6)
+        style.map("Accent.TButton", background=[("active", "#5be6f5")])
+
+        style.configure("Treeview", background=c["panel"], fieldbackground=c["panel"],
+                        foreground=c["fg"], bordercolor=c["border"], rowheight=24)
+        style.map("Treeview", background=[("selected", c["select"])],
+                  foreground=[("selected", c["accent"])])
+        style.configure("Treeview.Heading", background=c["panel2"], foreground=c["accent"],
+                        relief="flat", font=("JetBrains Mono", 10))
+
+        style.configure("Vertical.TScrollbar", background=c["panel2"],
+                        troughcolor=c["bg"], bordercolor=c["bg"], arrowcolor=c["sub"])
 
     def _build_ui(self):
         tk = self.tk
         ttk = self.ttk
 
-        top = ttk.Frame(self.root, padding=12)
+        # 内容层（窗口主体，铺满 miku 背景图）
+        self.content = tk.Frame(self.root, bg=THEME["bg"])
+        self.content.pack(fill="both", expand=True)
+
+        # 背景层：miku 铺满内容层
+        self.bg_label = tk.Label(self.content, bd=0)
+        self.bg_label.place(x=0, y=0, relwidth=1, relheight=1)
+        if self._bg_photo:
+            self.bg_label.configure(image=self._bg_photo)
+        self.content.bind("<Configure>", self._resize_bg)
+        self.bg_label.lower()  # 置于最底层
+
+        # ---- 顶部：歌曲目录 + 选歌 ----
+        top = ttk.Frame(self.content, padding=10)
         top.pack(fill="x")
 
-        ttk.Label(top, text="歌曲目录:").pack(side="left")
+        ttk.Label(top, text="SONGS", style="Accent.TLabel").pack(side="left")
         self.dir_var = tk.StringVar(value=str(self.song_dir))
-        ttk.Entry(top, textvariable=self.dir_var, width=48).pack(side="left", padx=6)
-        ttk.Button(top, text="浏览", command=self.choose_dir).pack(side="left", padx=4)
-        ttk.Button(top, text="刷新", command=self.refresh_songs).pack(side="left")
+        ttk.Entry(top, textvariable=self.dir_var, width=42).pack(side="left", padx=6)
+        ttk.Button(top, text="Browse", command=self.choose_dir).pack(side="left", padx=4)
+        ttk.Button(top, text="Refresh", command=self.refresh_songs).pack(side="left", padx=4)
+        ttk.Button(top, text="Add Audio", command=self.add_audio).pack(side="left", padx=4)
 
-        mid = ttk.Frame(self.root, padding=(12, 0, 12, 0))
-        mid.pack(fill="both", expand=True)
+        self.btn_infer = ttk.Button(top, text="Analyze", style="Accent.TButton",
+                                    command=self.infer_selected, state="disabled")
+        self.btn_infer.pack(side="left", padx=4)
+
+        self.btn_play = ttk.Button(top, text="Play/Pause", command=self.toggle_play, state="disabled")
+        self.btn_play.pack(side="left", padx=4)
+
+        self.status_var = tk.StringVar(value="Ready")
+        ttk.Label(top, textvariable=self.status_var, style="Sub.TLabel").pack(side="right")
+
+        # ---- 中部：歌曲列表 ----
+        mid = ttk.Frame(self.content, padding=(10, 0, 10, 0))
+        mid.pack(fill="x")
 
         cols = ("name", "status")
-        self.tree = ttk.Treeview(mid, columns=cols, show="headings", height=12)
-        self.tree.heading("name", text="歌曲")
-        self.tree.heading("status", text="分析状态")
-        self.tree.column("name", width=420)
+        self.tree = ttk.Treeview(mid, columns=cols, show="headings", height=6)
+        self.tree.heading("name", text="SONG")
+        self.tree.heading("status", text="STATUS")
+        self.tree.column("name", width=640)
         self.tree.column("status", width=140)
-        self.tree.pack(side="left", fill="both", expand=True)
+        self.tree.pack(side="left", fill="x", expand=True)
 
         sb = ttk.Scrollbar(mid, orient="vertical", command=self.tree.yview)
         sb.pack(side="right", fill="y")
         self.tree.configure(yscrollcommand=sb.set)
-        self.tree.bind("<Double-1>", lambda e: self.play_selected())
+        self.tree.bind("<Double-1>", lambda e: self.load_selected())
+        self.tree.bind("<<TreeviewSelect>>", self._on_select)
 
-        bottom = ttk.Frame(self.root, padding=12)
-        bottom.pack(fill="x")
+        # ---- 底部：波形播放区 ----
+        self.player_frame = ttk.Frame(self.content, padding=(10, 6, 10, 10))
+        self.player_frame.pack(fill="both", expand=True)
 
-        self.btn_add = ttk.Button(bottom, text="添加音频…", command=self.add_audio)
-        self.btn_add.pack(side="left")
-
-        self.btn_infer = ttk.Button(bottom, text="推理", command=self.infer_selected, state="disabled")
-        self.btn_infer.pack(side="left", padx=6)
-
-        self.btn_play = ttk.Button(bottom, text="播放", command=self.play_selected, state="disabled")
-        self.btn_play.pack(side="left")
-
-        self.status_var = tk.StringVar(value="就绪")
-        ttk.Label(bottom, textvariable=self.status_var, foreground="#555").pack(side="right")
+        self.placeholder = ttk.Label(
+            self.player_frame,
+            text="SELECT A SONG AND PRESS PLAY TO LOAD THE WAVEFORM",
+            style="Sub.TLabel", anchor="center"
+        )
+        self.placeholder.pack(fill="both", expand=True)
 
     def choose_dir(self):
         d = self.filedialog.askdirectory(initialdir=self.dir_var.get())
@@ -475,25 +615,25 @@ class App:
                 if f.suffix.lower() in AUDIO_EXTS:
                     ok = has_result(f)
                     self.tree.insert("", "end", iid=str(f), values=(
-                        f.name, "已分析 ✓" if ok else "未分析"
+                        f.name, "analyzed" if ok else "not analyzed"
                     ))
                     self.song_items.append(f)
-        self.status_var.set(f"共 {len(self.song_items)} 首歌")
+        self.status_var.set(f"{len(self.song_items)} songs")
 
     def add_audio(self):
         files = self.filedialog.askopenfilenames(
-            title="选择音频文件",
-            filetypes=[("音频文件", "*.wav *.mp3 *.flac *.m4a *.ogg *.aiff *.aac"), ("所有文件", "*.*")],
+            title="Select audio files",
+            filetypes=[("Audio", "*.wav *.mp3 *.flac *.m4a *.ogg *.aiff *.aac"), ("All", "*.*")],
         )
         for fp in files:
             p = Path(fp)
             if str(p) not in self.tree.get_children():
                 ok = has_result(p)
                 self.tree.insert("", "end", iid=str(p), values=(
-                    p.name, "已分析 ✓" if ok else "未分析"
+                    p.name, "analyzed" if ok else "not analyzed"
                 ))
                 self.song_items.append(p)
-        self.status_var.set(f"共 {len(self.song_items)} 首歌")
+        self.status_var.set(f"{len(self.song_items)} songs")
 
     def selected_audio(self) -> Path | None:
         sel = self.tree.selection()
@@ -509,28 +649,44 @@ class App:
             self.btn_infer.config(state="disabled")
             return
         self.current_audio = p
-        # 智能：有结果 → 可直接播放，推理按钮禁用；无结果 → 启用推理
         if has_result(p):
             self.btn_play.config(state="normal")
             self.btn_infer.config(state="disabled")
-            self.status_var.set(f"{p.name}：已分析，可直接播放")
+            self.status_var.set(f"{p.name}: analyzed, ready to play")
         else:
             self.btn_play.config(state="disabled")
             self.btn_infer.config(state="normal")
-            self.status_var.set(f"{p.name}：未分析，请先推理")
+            self.status_var.set(f"{p.name}: not analyzed, analyze first")
 
-    def play_selected(self):
+    def load_selected(self):
         p = self.selected_audio()
         if p is None:
             return
         jp = find_result(p)
         if jp is None:
-            self.messagebox.showinfo("提示", "这首歌还没有分析结果，请先推理。")
+            self.messagebox.showinfo("Notice", "This song has no analysis result yet. Analyze first.")
             return
         with open(jp, "r", encoding="utf-8") as f:
             data = json.load(f)
-        self.status_var.set(f"正在打开播放器：{p.name}")
-        self.root.after(100, lambda: PlayerWindow(p, data, title=p.stem).show())
+
+        self.status_var.set(f"Loading: {p.name}")
+
+        # 清掉旧面板
+        if self.panel is not None:
+            self.panel.destroy()
+            self.panel = None
+        self.placeholder.pack_forget()
+
+        self.panel = PlayerPanel(self.player_frame, p, data, on_status=self.status_var.set)
+        self.btn_play.config(state="normal")
+        self.status_var.set(f"Loaded: {p.name}")
+
+    def toggle_play(self):
+        if self.panel is None:
+            self.load_selected()
+            if self.panel is None:
+                return
+        self.panel.toggle_play()
 
     def infer_selected(self):
         if self.inferring:
@@ -541,27 +697,22 @@ class App:
         self.inferring = True
         self.btn_infer.config(state="disabled")
         self.btn_play.config(state="disabled")
-        dev = auto_device()
-
-        def progress(msg):
-            self.status_var.set(msg)
 
         def done(ok, msg):
             self.inferring = False
             self.status_var.set(msg)
             if ok:
-                # 刷新该行状态
                 if str(p) in self.tree.get_children():
-                    self.tree.set(str(p), "status", "已分析 ✓")
+                    self.tree.set(str(p), "status", "analyzed")
                 self.btn_play.config(state="normal")
+                self.load_selected()
             else:
                 self.btn_infer.config(state="normal")
-                self.messagebox.showerror("推理失败", msg)
+                self.messagebox.showerror("Analyze failed", msg)
 
-        run_inference(p, dev, progress_cb=progress, done_cb=done)
+        run_inference(p, auto_device(), progress_cb=self.status_var.set, done_cb=done)
 
     def run(self):
-        self.tree.bind("<<TreeviewSelect>>", self._on_select)
         self.root.mainloop()
 
 
