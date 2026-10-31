@@ -193,7 +193,7 @@ class PlayerPanel:
         # 播放状态
         self.state = {
             "pos": 0.0, "sample_pos": 0, "playing": False, "stream": None,
-            "speed": 1.0, "_bg": None, "_blit_ready": False,
+            "speed": 1.0, "_bg": None, "_blit_ready": False, "_dragging": False,
         }
 
         self._bind_events()
@@ -281,6 +281,10 @@ class PlayerPanel:
     def _bind_events(self):
         self.canvas.mpl_connect("key_press_event", self._on_key)
         self.canvas.mpl_connect("resize_event", self._on_resize)
+        # 游标拖拽：点击/拖动波形 seek 播放进度
+        self.canvas.mpl_connect("button_press_event", self._on_press)
+        self.canvas.mpl_connect("motion_notify_event", self._on_drag)
+        self.canvas.mpl_connect("button_release_event", self._on_release)
         # 让 canvas 能接收键盘焦点
         self.canvas.get_tk_widget().focus_set()
 
@@ -326,15 +330,21 @@ class PlayerPanel:
             self.state["stream"].start()
 
     def _refresh_info(self, pos):
-        self.cursor.set_xdata([pos, pos])
-        idx = self.get_seg_idx(pos)
-        bi = self.find_beat(pos)
-        s_label = self.seg_labels[idx]
-        pos_label = self.beat_positions[bi] if 0 <= bi < len(self.beat_positions) else 0
-        self.info.set_text(
-            f"TIME {mmss(pos)} / {mmss(self.duration)}   SEC {s_label.upper():<6}   "
-            f"BEAT {bi+1}/{len(self.beats)} (pos {pos_label})   BPM {self.bpm}"
-        )
+        try:
+            self.cursor.set_xdata([pos, pos])
+            idx = self.get_seg_idx(pos)
+            bi = self.find_beat(pos)
+            if 0 <= idx < len(self.seg_labels):
+                s_label = self.seg_labels[idx]
+            else:
+                s_label = "?"
+            pos_label = self.beat_positions[bi] if 0 <= bi < len(self.beat_positions) else 0
+            self.info.set_text(
+                f"TIME {mmss(pos)} / {mmss(self.duration)}   SEC {s_label.upper():<6}   "
+                f"BEAT {bi+1}/{len(self.beats)} (pos {pos_label})   BPM {self.bpm}"
+            )
+        except Exception:
+            pass
 
     def _update(self):
         # 窗口已关闭则跳过
@@ -344,22 +354,26 @@ class PlayerPanel:
         except Exception:
             return
 
-        if self.state["playing"] and self.state["pos"] >= self.duration:
-            self.state["pos"] = self.duration
-            self.stop()
+        try:
+            if self.state["playing"] and self.state["pos"] >= self.duration:
+                self.state["pos"] = self.duration
+                self.stop()
 
-        pos = self.state["pos"]
-        self._refresh_info(pos)
+            pos = self.state["pos"]
+            self._refresh_info(pos)
 
-        canvas = self.canvas
-        if not self.state["_blit_ready"]:
-            canvas.draw()
-            self.state["_bg"] = canvas.copy_from_bbox(self.ax.bbox)
-            self.state["_blit_ready"] = True
-        canvas.restore_region(self.state["_bg"])
-        self.ax.draw_artist(self.cursor)
-        self.ax.draw_artist(self.info)
-        canvas.blit(self.ax.bbox)
+            canvas = self.canvas
+            if not self.state["_blit_ready"]:
+                canvas.draw()
+                self.state["_bg"] = canvas.copy_from_bbox(self.ax.bbox)
+                self.state["_blit_ready"] = True
+            canvas.restore_region(self.state["_bg"])
+            self.ax.draw_artist(self.cursor)
+            self.ax.draw_artist(self.info)
+            canvas.blit(self.ax.bbox)
+        except Exception:
+            # 任何异常都不应中断 timer，避免画面停止更新
+            self.state["_blit_ready"] = False
 
     def _on_key(self, event):
         if event.key == " ":
@@ -376,6 +390,31 @@ class PlayerPanel:
     def _on_resize(self, event):
         self.state["_blit_ready"] = False
 
+    # ---- 游标拖拽（seek） ----
+    def _on_press(self, event):
+        # 仅左键，且点击落在 axes 内
+        if event.button != 1 or event.inaxes is None or event.xdata is None:
+            return
+        self.state["_dragging"] = True
+        self._seek_to(event.xdata)
+
+    def _on_drag(self, event):
+        if not self.state.get("_dragging") or event.inaxes is None or event.xdata is None:
+            return
+        self._seek_to(event.xdata)
+
+    def _on_release(self, event):
+        self.state["_dragging"] = False
+        # 释放后强制整帧重绘，确保画面与进度同步
+        self.state["_blit_ready"] = False
+
+    def _seek_to(self, t: float):
+        t = min(self.duration, max(0.0, float(t)))
+        self.state["pos"] = t
+        self.state["sample_pos"] = int(t * self.sr)
+        # 不在这里重绘；由 timer 的 _update 每 33ms 统一刷新 cursor/info，
+        # 避免与 blit 局部重绘竞争导致画面停滞。
+
     # ---- 供外部按钮调用的接口 ----
     def toggle_play(self):
         if self.state["playing"]:
@@ -387,10 +426,10 @@ class PlayerPanel:
                 self.state["stream"].start()
 
     def seek(self, delta):
-        self.state["pos"] = min(self.duration, max(0, self.state["pos"] + delta))
-        self.state["sample_pos"] = int(self.state["pos"] * self.sr)
+        self._seek_to(self.state["pos"] + delta)
 
     def stop(self):
+        """停止播放（仅停音频流；timer 保持运行以持续刷新画面）。"""
         self.state["playing"] = False
         stream = self.state["stream"]
         if stream is not None:
@@ -401,11 +440,15 @@ class PlayerPanel:
             except Exception:
                 pass
             self.state["stream"] = None
-        if hasattr(self, "timer"):
-            self.timer.stop()
 
     def destroy(self):
         self.stop()
+        # 销毁时停掉 timer，避免窗口已销毁后 timer 仍回调
+        if hasattr(self, "timer"):
+            try:
+                self.timer.stop()
+            except Exception:
+                pass
         try:
             self.canvas.get_tk_widget().destroy()
         except Exception:
@@ -454,7 +497,7 @@ class App:
     def _on_close(self):
         self._closing = True
         if self.panel is not None:
-            self.panel.stop()
+            self.panel.destroy()
         self.root.destroy()
 
     def _load_bg_image(self):
