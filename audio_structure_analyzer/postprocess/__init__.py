@@ -1,6 +1,9 @@
 """后处理插件包。
 
-提供统一的后处理接口与调度入口。新增后处理方案只需：
+提供统一的后处理接口与调度入口。后处理（PostProcessor）是**判据组合器**，
+组合多个判据（Criterion，见 :mod:`criteria`）并融合其候选。
+
+新增后处理方案只需：
 
 1. 实现 :class:`~audio_structure_analyzer.postprocess.base.PostProcessor` 子类；
 2. 在 :data:`REGISTRY` 里登记（一行）。
@@ -30,18 +33,16 @@ from .base import (
     PostProcessor,
     PostProcessResult,
 )
-from .prechorus import PreChorusDetector
-from .spatiotemporal import SpatiotemporalDetector
+from .prechorus import PreChorusProcessor
 
 # ---- 方案注册表：name -> PostProcessor 类 ----
 # 新增方案在此登记即可被 run_postprocess / run_all 发现。
 REGISTRY: Dict[str, Type[PostProcessor]] = {
-    PreChorusDetector.name: PreChorusDetector,
-    SpatiotemporalDetector.name: SpatiotemporalDetector,
+    PreChorusProcessor.name: PreChorusProcessor,
 }
 
 # 默认执行顺序（按名字）。
-DEFAULT_ORDER: List[str] = [PreChorusDetector.name, SpatiotemporalDetector.name]
+DEFAULT_ORDER: List[str] = [PreChorusProcessor.name]
 
 
 def available_processors() -> List[str]:
@@ -105,8 +106,7 @@ __all__ = [
     "PostProcessor",
     "PostProcessResult",
     "PostProcessCandidate",
-    "PreChorusDetector",
-    "SpatiotemporalDetector",
+    "PreChorusProcessor",
     "available_processors",
     "get_processor",
     "run_postprocess",

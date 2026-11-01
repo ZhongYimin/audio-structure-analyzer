@@ -287,13 +287,22 @@ class PlayerPanel:
         ax.set_title(title_text, color=FG, fontsize=13, pad=12, loc="left")
 
     def _draw_candidate(self, seg_idx: int, cand, proc_name: str):
-        """在段落上绘制某后处理方案的候选高亮（虚线框 + 置信度标签）。"""
-        # 每个方案一个高亮色，便于区分多个方案叠加
+        """在段落上绘制某后处理方案的候选高亮（虚线框 + 置信度标签）。
+
+        高亮颜色按候选的**判据来源（source）**区分，便于看出是哪个判据命中：
+        - position      → 黄（结构：位置规则）
+        - energy_match  → 橙（结构：能量传导）
+        - orchestration → 绿（配器）
+        - harmonic_shift→ 紫（和声）
+        """
+        source = cand.get("source", "") if isinstance(cand, dict) else getattr(cand, "source", "")
         colors = {
-            "prechorus": "#ffd166",       # 黄（位置+能量判据）
-            "spatiotemporal": "#5ce1a6",  # 绿（时空/配器判据）
+            "position": "#ffd166",        # 黄（位置规则）
+            "energy_match": "#ff9f43",    # 橙（能量传导）
+            "orchestration": "#5ce1a6",   # 绿（配器）
+            "harmonic_shift": "#c792ea",  # 紫（和声）
         }
-        hl = colors.get(proc_name, "#ffd166")
+        hl = colors.get(source, "#ffd166")
         ax = self.ax
         ax.axvspan(
             self.seg_starts[seg_idx], self.seg_ends[seg_idx],
@@ -302,12 +311,12 @@ class PlayerPanel:
         )
         mid = (self.seg_starts[seg_idx] + self.seg_ends[seg_idx]) / 2
         conf = cand.get("confidence", 0.0) if isinstance(cand, dict) else getattr(cand, "confidence", 0.0)
-        # 不同方案标签纵向错开，避免重叠
+        # 不同判据标签纵向错开，避免重叠
         base_y = 0.72
-        offset = {"prechorus": 0.0, "spatiotemporal": -0.14}.get(proc_name, 0.0)
+        offset = {"position": 0.0, "energy_match": -0.12, "orchestration": -0.24, "harmonic_shift": -0.36}.get(source, 0.0)
         ax.text(
             mid, self.ymax * (base_y + offset),
-            f"{proc_name} {conf*100:.0f}%",
+            f"pre-chorus {conf*100:.0f}% ({source})",
             ha="center", va="top", fontsize=9,
             color=hl, zorder=6,
             bbox=dict(boxstyle="round,pad=0.25", fc="#1c2230", ec=hl, alpha=0.85),

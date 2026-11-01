@@ -98,7 +98,8 @@ def preprocess(
         y = sr = None
 
     # 跑后处理，结果并入 result.postprocess
-    post = run_all(result, y=y, sr=sr, names=processors)
+    # cache_dir 传给配器判据等需要分轨缓存的方案
+    post = run_all(result, y=y, sr=sr, names=processors, cache_dir=cache_dir)
     result.postprocess = {name: res.to_dict() for name, res in post.items()}
 
     # 合并落盘到同一份 JSON

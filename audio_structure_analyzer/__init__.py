@@ -11,12 +11,20 @@ from .analyzer import (  # noqa: F401
     analyze,
     load_result,
 )
+from .criteria import (  # noqa: F401
+    Criterion,
+    CriterionCategory,
+    CriterionResult,
+    EnergyMatchCriterion,
+    HarmonicShiftCriterion,
+    OrchestrationCriterion,
+    PositionCriterion,
+)
 from .postprocess import (  # noqa: F401
     PostProcessCandidate,
     PostProcessor,
     PostProcessResult,
-    PreChorusDetector,
-    SpatiotemporalDetector,
+    PreChorusProcessor,
     available_processors,
     run_all,
     run_postprocess,
@@ -28,7 +36,7 @@ from .pipeline import (  # noqa: F401
     preprocess,
 )
 
-__version__ = "0.7.0"
+__version__ = "0.8.0"
 
 __all__ = [
     "HARMONIX_LABELS",
@@ -36,12 +44,19 @@ __all__ = [
     "Segment",
     "analyze",
     "load_result",
+    # 判据
+    "Criterion",
+    "CriterionResult",
+    "CriterionCategory",
+    "PositionCriterion",
+    "EnergyMatchCriterion",
+    "OrchestrationCriterion",
+    "HarmonicShiftCriterion",
     # 后处理
     "PostProcessor",
     "PostProcessResult",
     "PostProcessCandidate",
-    "PreChorusDetector",
-    "SpatiotemporalDetector",
+    "PreChorusProcessor",
     "available_processors",
     "run_postprocess",
     "run_all",

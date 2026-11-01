@@ -1,24 +1,23 @@
-"""pre-chorus（前副歌）候选检测后处理。
+"""pre-chorus（前副歌）后处理：组合三类判据识别 pre-chorus。
 
-Harmonix 的 10 类标签里没有 pre-chorus，all-in-one 会把 pre-chorus
-误标成 verse（导致「连续 verse → chorus」或「chorus → verse → chorus」
-中出现"假 verse"）。本方案用启发式规则 + 能量相似传导，把这些疑似
-pre-chorus 的 verse 段标出来，并给出置信度。
+Harmonix 的 10 类标签里没有 pre-chorus，all-in-one 会把 pre-chorus 误标成
+verse（导致「连续 verse → chorus」中出现「假 verse」）。本后处理组合三类
+判据，把疑似 pre-chorus 的 verse 段标出来，并给出融合置信度。
 
-两阶段：
-阶段 1（位置规则）——cur 是 verse，前一段也是 verse（连续），后一段是 chorus：
-    判据：时长比（越短越像）+ 能量爬升（越高越像），合成基础置信度。
-阶段 2（能量相似传导）——凡是被高置信判为 pre-chorus 的段，其 RMS 能量
-    可作为"指纹"；其它尚未识别的 verse 段若同时满足：
-    (a) 后一段是 chorus（基础位置判据，pre-chorus 本质是"通向副歌"）
-    (b) RMS 与种子相近（0.85~1.18）
-    (c) 时长与种子相近（0.8~1.25）
-    则说明是同一段音乐材料，沿用该候选的置信度（哪怕它前一段不是 verse）。
+组合的判据（见 :mod:`criteria`）：
 
-可调参数（构造时传入）：
-    seed_confidence  阶段 1 候选作为传导种子的置信度阈值（默认 0.6）
-    rms_lo / rms_hi  传导的 RMS 相似窗口（默认 0.85 / 1.18）
-    dur_lo / dur_hi  传导的时长相似窗口（默认 0.8 / 1.25）
+1. :class:`~criteria.structure.PositionCriterion`（结构）——
+   verse→verse→chorus 位置规则 + 时长比 + 能量爬升；
+2. :class:`~criteria.structure.EnergyMatchCriterion`（结构）——
+   与已识别 PC 段能量/时长相近的传导；
+3. :class:`~criteria.orchestration.OrchestrationCriterion`（配器）——
+   贝斯/底鼓进入 + 开镲/人声变亮/铺底加厚；
+4. :class:`~criteria.harmonic.HarmonicShiftCriterion`（和声）——
+   相邻 verse 段和弦走向差异。
+
+融合策略：按段落下标聚合各判据的候选，置信度取「判据间互补叠加」——
+即不同判据命中同一段时，置信度叠加（封顶 1.0），体现「多判据交叉验证
+更可信」；单判据命中则保留该判据置信度。
 """
 
 from __future__ import annotations
@@ -28,149 +27,103 @@ from typing import Dict, Optional
 import numpy as np
 
 from ..analyzer import AnalysisResult
+from ..criteria import (
+    EnergyMatchCriterion,
+    HarmonicShiftCriterion,
+    OrchestrationCriterion,
+    PositionCriterion,
+)
 from .base import PostProcessCandidate, PostProcessor, PostProcessResult
 
 
-class PreChorusDetector(PostProcessor):
+class PreChorusProcessor(PostProcessor):
+    """组合结构 + 配器 + 和声三类判据识别 pre-chorus。"""
+
     name = "prechorus"
-    requires_audio = True  # 阶段 2 需要 RMS 能量
+    requires_audio = True  # 结构（RMS）+ 配器（分轨）+ 和声（chroma）都需要波形
 
-    # 默认超参
-    SEED_CONFIDENCE = 0.6
-    RMS_LO, RMS_HI = 0.85, 1.18
-    DUR_LO, DUR_HI = 0.8, 1.25
+    def __init__(self, **params):
+        super().__init__(**params)
+        cache_dir = params.get("cache_dir")
+        # 结构判据
+        self.position = PositionCriterion(
+            **{k: params[k] for k in ("base", "w_dur", "w_energy") if k in params}
+        )
+        self.energy_match = EnergyMatchCriterion(
+            **{k: params[k] for k in ("seed_confidence", "rms_lo", "rms_hi", "dur_lo", "dur_hi") if k in params}
+        )
+        # 配器判据
+        self.orchestration = OrchestrationCriterion(
+            **{k: params[k] for k in ("enter_ratio", "enhance_ratio", "cache_dir") if k in params}
+        )
+        # 和声判据
+        self.harmonic = HarmonicShiftCriterion(
+            **{k: params[k] for k in ("corr_threshold", "max_confidence", "hop") if k in params}
+        )
+        self.criteria = [self.position, self.orchestration, self.harmonic]
 
-    def process(
-        self,
-        result: AnalysisResult,
-        y: Optional[np.ndarray] = None,
-        sr: Optional[int] = None,
-    ) -> PostProcessResult:
-        segments = result.segments
-        bpm = result.bpm
-        n = len(segments)
+    def process(self, result, y=None, sr=None) -> PostProcessResult:
+        # 1) 位置规则判据（作为基础候选 + 传导种子）
+        pos = self.position.judge(result, y=y, sr=sr)
+        position_candidates = {c.segment_index: c for c in pos.candidates}
 
-        seed_conf = float(self.params.get("seed_confidence", self.SEED_CONFIDENCE))
-        rms_lo = float(self.params.get("rms_lo", self.RMS_LO))
-        rms_hi = float(self.params.get("rms_hi", self.RMS_HI))
-        dur_lo = float(self.params.get("dur_lo", self.DUR_LO))
-        dur_hi = float(self.params.get("dur_hi", self.DUR_HI))
-
-        # 预计算每段的 RMS 能量（需要 y/sr）
-        rms: Dict[int, float] = {}
-        if y is not None and sr is not None and len(y):
-            rms = _seg_rms_map(segments, y, sr)
-
-        candidates: Dict[int, PostProcessCandidate] = {}
-
-        # ---- 阶段 1：位置规则 ----
-        for i in range(1, n - 1):
-            prv = segments[i - 1]
-            cur = segments[i]
-            nxt = segments[i + 1]
-            if cur.label != "verse" or prv.label != "verse" or nxt.label != "chorus":
-                continue
-
-            d_prev = prv.duration
-            d_cur = cur.duration
-            dur_ratio = d_cur / d_prev if d_prev > 0 else 1.0
-
-            # 信号 1：时长比（越短越像 pre-chorus）
-            score_dur = max(0.0, 1.0 - dur_ratio)
-
-            # 信号 2：能量爬升
-            score_energy = 0.0
-            if i in rms and (i - 1) in rms:
-                e_prev, e_cur = rms[i - 1], rms[i]
-                if e_prev > 0:
-                    ratio = e_cur / e_prev
-                    score_energy = min(1.0, max(0.0, (ratio - 1.0) * 2.0))
-
-            confidence = min(1.0, 0.5 + 0.30 * score_dur + 0.20 * score_energy)
-
-            reasons = []
-            if score_dur > 0.15:
-                reasons.append(f"shorter ({d_cur:.0f}/{d_prev:.0f}s)")
-            if score_energy > 0.15:
-                reasons.append("energy rise")
-
-            candidates[i] = PostProcessCandidate(
-                segment_index=i,
-                start=cur.start,
-                end=cur.end,
-                label="pre-chorus?",
-                confidence=round(confidence, 2),
-                reason=", ".join(reasons) if reasons else "position only",
-                source="position",
-            )
-
-        # ---- 阶段 2：能量相似传导 ----
+        # 2) 能量传导判据（种子 = 位置规则的高置信候选）
         seeds = [
-            i for i, c in candidates.items()
-            if c.confidence >= seed_conf and i in rms
+            i for i, c in position_candidates.items()
+            if c.confidence >= self.energy_match.SEED_CONFIDENCE
         ]
-        for i in range(n):
-            if segments[i].label != "verse" or i in candidates or i not in rms:
-                continue
-            # 基础判据：目标段后一段必须是 chorus
-            if i + 1 >= n or segments[i + 1].label != "chorus":
-                continue
+        self.energy_match.params["seeds"] = seeds
+        self.energy_match.params["seed_conf_map"] = {
+            i: c.confidence for i, c in position_candidates.items()
+        }
+        em = self.energy_match.judge(result, y=y, sr=sr)
 
-            d_cur = segments[i].duration
-            best_conf = 0.0
-            best_reason = ""
-            for s_idx in seeds:
-                e_seed, e_cur = rms[s_idx], rms[i]
-                d_seed = segments[s_idx].duration
-                if e_seed <= 0:
-                    continue
-                rms_ratio = e_cur / e_seed
-                if not (rms_lo <= rms_ratio <= rms_hi):
-                    continue
-                dur_ratio = d_cur / d_seed if d_seed > 0 else 1.0
-                if not (dur_lo <= dur_ratio <= dur_hi):
-                    continue
-                conf = candidates[s_idx].confidence
-                if conf > best_conf:
-                    best_conf = conf
-                    best_reason = (
-                        f"similar to seg[{s_idx}] (RMS {rms_ratio:.2f}, dur {dur_ratio:.2f})"
-                    )
-            if best_conf > 0:
-                candidates[i] = PostProcessCandidate(
-                    segment_index=i,
-                    start=segments[i].start,
-                    end=segments[i].end,
-                    label="pre-chorus?",
-                    confidence=round(best_conf, 2),
-                    reason=best_reason,
-                    source="energy-match",
-                )
+        # 3) 配器判据
+        orch = self.orchestration.judge(result, y=y, sr=sr)
+
+        # 4) 和声判据
+        harm = self.harmonic.judge(result, y=y, sr=sr)
+
+        # ---- 融合 ----
+        fused: Dict[int, PostProcessCandidate] = {}
+        contributions: Dict[int, list] = {}
+
+        def _add(cand: PostProcessCandidate):
+            i = cand.segment_index
+            contributions.setdefault(i, []).append((cand.source, cand.confidence))
+            if i not in fused:
+                fused[i] = cand
+            else:
+                # 多判据交叉验证：置信度互补叠加（封顶 1.0）
+                prev = fused[i]
+                new_conf = min(1.0, prev.confidence + cand.confidence)
+                prev.confidence = round(new_conf, 2)
+                prev.reason = prev.reason + "; " + cand.reason
+                # 合并 extra
+                prev.extra = {**prev.extra, **cand.extra}
+
+        for c in position_candidates.values():
+            _add(c)
+        for c in em.candidates:
+            _add(c)
+        for c in orch.candidates:
+            _add(c)
+        for c in harm.candidates:
+            _add(c)
+
+        meta = {
+            "criteria": [c.name for c in self.criteria],
+            "position": len(pos.candidates),
+            "energy_match": len(em.candidates),
+            "orchestration": len(orch.candidates),
+            "harmonic": len(harm.candidates),
+        }
 
         return PostProcessResult(
             name=self.name,
-            candidates=list(candidates.values()),
-            meta={"seed_confidence": seed_conf},
+            candidates=list(fused.values()),
+            meta=meta,
         )
 
 
-def _seg_rms_map(segments, y: np.ndarray, sr: int) -> Dict[int, float]:
-    """计算每段的 RMS 能量均值，返回 {segment_index: rms}。"""
-    try:
-        import librosa
-    except Exception:
-        return {}
-    try:
-        hop = 512
-        rms_env = librosa.feature.rms(y=y, hop_length=hop)[0]
-        rms_times = librosa.frames_to_time(
-            np.arange(len(rms_env)), sr=sr, hop_length=hop
-        )
-
-        out: Dict[int, float] = {}
-        for i, s in enumerate(segments):
-            m = (rms_times >= s.start) & (rms_times < s.end)
-            out[i] = float(rms_env[m].mean()) if m.any() else 0.0
-        return out
-    except Exception:
-        return {}
+__all__ = ["PreChorusProcessor"]
