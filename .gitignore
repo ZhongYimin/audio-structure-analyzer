@@ -25,6 +25,9 @@ venv/
 
 # --- 声部分离缓存（Demucs stems，可重新生成） ---
 .asa_cache/
+test_audio/stems/
+test_audio/stems_npy/
+test_audio/embed/
 
 # --- 测试产物（保留 test_audio/allin1/*.json 参考结果） ---
 test_audio/*.json

@@ -86,6 +86,19 @@ class AnalysisResult:
             json.dump(self.to_dict(), f, ensure_ascii=False, indent=2)
         return path
 
+    @classmethod
+    def from_dict(cls, data: dict) -> "AnalysisResult":
+        """从 to_dict() / all-in-one 原生 JSON 的 dict 结构构造结果。"""
+        return cls(
+            path=data["path"],
+            bpm=int(data["bpm"]),
+            beats=[float(x) for x in data.get("beats", [])],
+            downbeats=[float(x) for x in data.get("downbeats", [])],
+            beat_positions=[int(x) for x in data.get("beat_positions", [])],
+            segments=[Segment(start=s["start"], end=s["end"], label=s["label"]) for s in data["segments"]],
+            activation_fps=data.get("activation_fps"),
+        )
+
 
 def _from_allin1(raw) -> AnalysisResult:
     """把 `allin1_infer` 的原生 AnalysisResult 转成本项目结构。"""
@@ -144,12 +157,4 @@ def load_result(path: PathLike) -> AnalysisResult:
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
 
-    return AnalysisResult(
-        path=data["path"],
-        bpm=int(data["bpm"]),
-        beats=[float(x) for x in data.get("beats", [])],
-        downbeats=[float(x) for x in data.get("downbeats", [])],
-        beat_positions=[int(x) for x in data.get("beat_positions", [])],
-        segments=[Segment(start=s["start"], end=s["end"], label=s["label"]) for s in data["segments"]],
-        activation_fps=data.get("activation_fps"),
-    )
+    return AnalysisResult.from_dict(data)

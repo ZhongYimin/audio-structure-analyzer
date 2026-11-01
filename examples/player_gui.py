@@ -21,6 +21,14 @@ from pathlib import Path
 
 import numpy as np
 
+# 让 `examples/player_gui.py` 从任意目录运行时都能找到项目包
+# （把 examples 的父目录，即包根，加入 sys.path）
+_PKG_ROOT = Path(__file__).resolve().parent.parent
+if str(_PKG_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PKG_ROOT))
+
+from audio_structure_analyzer import AnalysisResult, run_postprocess
+
 
 # ---- 常量 ----
 
@@ -189,6 +197,16 @@ class PlayerPanel:
         self.seg_ends = [s["end"] for s in segments]
         self.seg_labels = [s["label"] for s in segments]
 
+        # 后处理（插件式）：把 data 转成 AnalysisResult 后跑所有已注册方案
+        analysis = AnalysisResult.from_dict(data)
+        self.postprocess_results = {}
+        self.prechorus_candidates = {}
+        for name in ("prechorus",):
+            res = run_postprocess(name, analysis, y=self.y, sr=self.sr)
+            self.postprocess_results[name] = res
+            if name == "prechorus":
+                self.prechorus_candidates = res.by_segment()
+
         self._build_figure()
         self.canvas = FigureCanvasTkAgg(self.fig, master=parent)
         self.canvas.get_tk_widget().pack(fill="both", expand=True)
@@ -258,6 +276,27 @@ class PlayerPanel:
         for i in range(len(self.seg_starts)):
             color = LABEL_COLORS.get(self.seg_labels[i], "#5f6b7a")
             ax.axvspan(self.seg_starts[i], self.seg_ends[i], color=color, alpha=0.14, zorder=1)
+
+            # pre-chorus 候选：加虚线边框 + 高亮标注
+            if i in self.prechorus_candidates:
+                cand = self.prechorus_candidates[i]
+                conf = cand.confidence
+                # 虚线边框标出候选区域
+                ax.axvspan(
+                    self.seg_starts[i], self.seg_ends[i],
+                    facecolor="none", edgecolor="#ffd166", linewidth=1.4,
+                    linestyle="--", alpha=0.9, zorder=5,
+                )
+                mid = (self.seg_starts[i] + self.seg_ends[i]) / 2
+                ax.text(
+                    mid, self.ymax * 0.72,
+                    f"pre-chorus? {conf*100:.0f}%",
+                    ha="center", va="top", fontsize=10,
+                    color="#ffd166", zorder=6,
+                    bbox=dict(boxstyle="round,pad=0.25", fc="#1c2230", ec="#ffd166", alpha=0.85),
+                )
+                continue
+
             mid = (self.seg_starts[i] + self.seg_ends[i]) / 2
             ax.text(mid, self.ymax * 0.88, self.seg_labels[i], ha="center", va="top",
                     fontsize=11, color=color, zorder=6)

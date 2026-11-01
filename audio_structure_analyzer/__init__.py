@@ -11,8 +11,18 @@ from .analyzer import (  # noqa: F401
     analyze,
     load_result,
 )
+from .postprocess import (  # noqa: F401
+    PostProcessCandidate,
+    PostProcessor,
+    PostProcessResult,
+    PreChorusDetector,
+    SpatiotemporalDetector,
+    available_processors,
+    run_all,
+    run_postprocess,
+)
 
-__version__ = "0.4.0"
+__version__ = "0.6.0"
 
 __all__ = [
     "HARMONIX_LABELS",
@@ -20,5 +30,14 @@ __all__ = [
     "Segment",
     "analyze",
     "load_result",
+    # 后处理
+    "PostProcessor",
+    "PostProcessResult",
+    "PostProcessCandidate",
+    "PreChorusDetector",
+    "SpatiotemporalDetector",
+    "available_processors",
+    "run_postprocess",
+    "run_all",
     "__version__",
 ]
