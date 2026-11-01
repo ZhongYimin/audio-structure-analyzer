@@ -294,32 +294,52 @@ class PlayerPanel:
         - energy_match  → 橙（结构：能量传导）
         - orchestration → 绿（配器）
         - harmonic_shift→ 紫（和声）
+
+        当融合候选携带 ``sources``（各判据独立贡献）时，逐条判据分别
+        画高亮 + 标签（纵向错开），让「多判据交叉验证」的每一层证据
+        都可见，而不是被单一 ``source`` 字段吞掉。
         """
-        source = cand.get("source", "") if isinstance(cand, dict) else getattr(cand, "source", "")
         colors = {
             "position": "#ffd166",        # 黄（位置规则）
             "energy_match": "#ff9f43",    # 橙（能量传导）
             "orchestration": "#5ce1a6",   # 绿（配器）
             "harmonic_shift": "#c792ea",  # 紫（和声）
         }
-        hl = colors.get(source, "#ffd166")
+        offset = {"position": 0.0, "energy_match": -0.12, "orchestration": -0.24, "harmonic_shift": -0.36}
+
+        # 优先读取融合保留的多判据贡献（sources）
+        sources = cand.get("sources") if isinstance(cand, dict) else getattr(cand, "sources", None)
+        if sources:
+            # 逐判据绘制：每条贡献用自己的颜色 + 纵向错位
+            for s in sources:
+                src = s.get("source", "") if isinstance(s, dict) else getattr(s, "source", "")
+                conf = s.get("confidence", 0.0) if isinstance(s, dict) else getattr(s, "confidence", 0.0)
+                hl = colors.get(src, "#ffd166")
+                dy = offset.get(src, 0.0)
+                self._draw_one_highlight(seg_idx, hl, conf, src, dy)
+        else:
+            # 兼容旧数据（无 sources 字段）：退化为单一 source 渲染
+            source = cand.get("source", "") if isinstance(cand, dict) else getattr(cand, "source", "")
+            conf = cand.get("confidence", 0.0) if isinstance(cand, dict) else getattr(cand, "confidence", 0.0)
+            hl = colors.get(source, "#ffd166")
+            self._draw_one_highlight(seg_idx, hl, conf, source, offset.get(source, 0.0))
+
+    def _draw_one_highlight(self, seg_idx: int, color: str, conf: float, label: str, dy: float):
+        """画一条单判据高亮：虚线框 + 置信度标签（纵向错位 dy）。"""
         ax = self.ax
         ax.axvspan(
             self.seg_starts[seg_idx], self.seg_ends[seg_idx],
-            facecolor="none", edgecolor=hl, linewidth=1.4,
+            facecolor="none", edgecolor=color, linewidth=1.4,
             linestyle="--", alpha=0.9, zorder=5,
         )
         mid = (self.seg_starts[seg_idx] + self.seg_ends[seg_idx]) / 2
-        conf = cand.get("confidence", 0.0) if isinstance(cand, dict) else getattr(cand, "confidence", 0.0)
-        # 不同判据标签纵向错开，避免重叠
         base_y = 0.72
-        offset = {"position": 0.0, "energy_match": -0.12, "orchestration": -0.24, "harmonic_shift": -0.36}.get(source, 0.0)
         ax.text(
-            mid, self.ymax * (base_y + offset),
-            f"pre-chorus {conf*100:.0f}% ({source})",
+            mid, self.ymax * (base_y + dy),
+            f"pre-chorus {conf*100:.0f}% ({label})",
             ha="center", va="top", fontsize=9,
-            color=hl, zorder=6,
-            bbox=dict(boxstyle="round,pad=0.25", fc="#1c2230", ec=hl, alpha=0.85),
+            color=color, zorder=6,
+            bbox=dict(boxstyle="round,pad=0.25", fc="#1c2230", ec=color, alpha=0.85),
         )
 
     def set_processors(self, enabled: list[str]):

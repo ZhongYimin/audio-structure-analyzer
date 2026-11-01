@@ -36,7 +36,20 @@ class PostProcessCandidate:
     """判据说明（供调试 / 展示）。"""
 
     source: str = ""
-    """判据来源（如 ``"position"`` / ``"energy_match"`` / ``"harmonic_shift"``）。"""
+    """主判据来源（如 ``"position"`` / ``"energy_match"`` / ``"harmonic_shift"``）。
+
+    当多个判据命中同一段时，``source`` 只保留**主判据**（见 :attr:`sources`），
+    便于向后兼容「单来源配色」的旧渲染逻辑。
+    """
+
+    sources: List[Dict[str, Any]] = field(default_factory=list)
+    """各判据对这段的**独立贡献**，每条为 ``{"source": str, "confidence": float, "reason": str}``。
+
+    这是融合后保留「多判据交叉验证」证据的关键：一个候选可能同时被
+    position（结构）与 harmonic_shift（和声）命中，``sources`` 把每条判据
+    的贡献原样保留，播放器据此按判据分别配色 / 标注，而不是被单一
+    ``source`` 字段吞掉。
+    """
 
     extra: Dict[str, Any] = field(default_factory=dict)
     """方案自定义的附加信息。"""
@@ -50,6 +63,7 @@ class PostProcessCandidate:
             "confidence": self.confidence,
             "reason": self.reason,
             "source": self.source,
+            "sources": [dict(s) for s in self.sources],
             "extra": self.extra,
         }
 

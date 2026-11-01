@@ -86,16 +86,27 @@ class PreChorusProcessor(PostProcessor):
 
         # ---- 融合 ----
         fused: Dict[int, PostProcessCandidate] = {}
-        contributions: Dict[int, list] = {}
 
         def _add(cand: PostProcessCandidate):
             i = cand.segment_index
-            contributions.setdefault(i, []).append((cand.source, cand.confidence))
+            # 记录这条判据的独立贡献（供播放器按判据分别配色 / 标注）
+            contrib = {
+                "source": cand.source,
+                "confidence": cand.confidence,
+                "reason": cand.reason,
+            }
             if i not in fused:
+                # 首次命中：以该判据为「主判据」，并建立 sources 列表
+                cand.sources = [contrib]
                 fused[i] = cand
             else:
-                # 多判据交叉验证：置信度互补叠加（封顶 1.0）
+                # 多判据交叉验证：置信度互补叠加（封顶 1.0），
+                # 但**保留每条判据的独立贡献**，不吞掉来源。
                 prev = fused[i]
+                prev.sources.append(contrib)
+                # 主判据取「置信度最高」的判据（首次命中可能不是最强的）
+                best = max(prev.sources, key=lambda s: s["confidence"])
+                prev.source = best["source"]
                 new_conf = min(1.0, prev.confidence + cand.confidence)
                 prev.confidence = round(new_conf, 2)
                 prev.reason = prev.reason + "; " + cand.reason
