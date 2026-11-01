@@ -25,10 +25,12 @@ from .postprocess import (  # noqa: F401
     PostProcessor,
     PostProcessResult,
     PreChorusProcessor,
+    StyleProfileProcessor,
     available_processors,
     run_all,
     run_postprocess,
 )
+from .genre import GenreClassifier  # noqa: F401
 from .pipeline import (  # noqa: F401
     find_result,
     load_audio,
@@ -36,7 +38,7 @@ from .pipeline import (  # noqa: F401
     preprocess,
 )
 
-__version__ = "0.8.0"
+__version__ = "0.9.0"
 
 __all__ = [
     "HARMONIX_LABELS",
@@ -57,6 +59,7 @@ __all__ = [
     "PostProcessResult",
     "PostProcessCandidate",
     "PreChorusProcessor",
+    "StyleProfileProcessor",
     "available_processors",
     "run_postprocess",
     "run_all",
@@ -65,5 +68,7 @@ __all__ = [
     "load_bundle",
     "find_result",
     "load_audio",
+    # 流派识别（MAEST 模型）
+    "GenreClassifier",
     "__version__",
 ]

@@ -5,6 +5,11 @@ soundfile>=0.12
 sounddevice>=0.4
 matplotlib>=3.7
 
+# 流派识别：MAEST 细粒度音乐风格分类模型（mtg-upf/discogs-maest-10s-dw-75e）
+# 经 transformers 的 audio-classification pipeline 加载，需 torch 2.x
+transformers>=4.46,<5.0
+torch>=2.0
+
 # 分析后端：all-in-one 音乐结构分析（harmonix-all 模型，MIT）
 #
 # 官方包 `allin1`（mir-aidj/all-in-one）依赖 madmom，而 madmom 在 Windows/Python 3.12

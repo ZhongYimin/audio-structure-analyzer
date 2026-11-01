@@ -34,15 +34,17 @@ from .base import (
     PostProcessResult,
 )
 from .prechorus import PreChorusProcessor
+from .style import StyleProfileProcessor
 
 # ---- 方案注册表：name -> PostProcessor 类 ----
 # 新增方案在此登记即可被 run_postprocess / run_all 发现。
 REGISTRY: Dict[str, Type[PostProcessor]] = {
     PreChorusProcessor.name: PreChorusProcessor,
+    StyleProfileProcessor.name: StyleProfileProcessor,
 }
 
 # 默认执行顺序（按名字）。
-DEFAULT_ORDER: List[str] = [PreChorusProcessor.name]
+DEFAULT_ORDER: List[str] = [PreChorusProcessor.name, StyleProfileProcessor.name]
 
 
 def available_processors() -> List[str]:
@@ -107,6 +109,7 @@ __all__ = [
     "PostProcessResult",
     "PostProcessCandidate",
     "PreChorusProcessor",
+    "StyleProfileProcessor",
     "available_processors",
     "get_processor",
     "run_postprocess",

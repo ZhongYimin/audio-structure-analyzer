@@ -29,6 +29,10 @@ test_audio/stems/
 test_audio/stems_npy/
 test_audio/embed/
 
+# --- 模型权重（体积大，运行时按需下载到 HF 缓存） ---
+models/
+*.pth
+
 # --- 测试产物（保留 test_audio/allin1/*.json 参考结果） ---
 test_audio/*.json
 test_audio/beat_alignment.png

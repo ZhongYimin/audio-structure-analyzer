@@ -284,6 +284,15 @@ class PlayerPanel:
         ax.set_xlabel("Time (s)")
         ax.set_ylabel("Amplitude")
         title_text = f"{self.audio.stem}   ·   BPM {self.bpm}"
+        # 附加流派标签（style 方案，MAEST 细粒度多标签，若有）
+        style_pp = self.result.postprocess.get("style")
+        if style_pp:
+            tags = style_pp.get("meta", {}).get("genre_tags", [])
+            dist = style_pp.get("meta", {}).get("genre_dist", {})
+            if tags:
+                # 只显示 top-3，去掉「大类---」前缀，简洁展示子类
+                short = [t.split("---")[-1] for t in tags[:3]]
+                title_text += f"   ·   {', '.join(short)}"
         ax.set_title(title_text, color=FG, fontsize=13, pad=12, loc="left")
 
     def _draw_candidate(self, seg_idx: int, cand, proc_name: str):
