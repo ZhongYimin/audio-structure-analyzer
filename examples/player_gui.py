@@ -1,10 +1,17 @@
-"""all-in-one 结构分析播放器（单窗口：选歌 + 推理 + 播放一体化）。
+"""all-in-one 结构分析播放器（纯前端：选歌 + 推理 + 播放 + 后处理展示）。
+
+定位：本文件是「前端」，只负责 UI 展示与播放控制。所有分析、落盘、后处理
+编排逻辑都在后端包 ``audio_structure_analyzer``（尤其 ``pipeline`` 模块）里，
+前端通过 pipeline 的少数几个入口调用，不直接接触 ``allin1_infer`` / Demucs /
+后处理注册等实现细节。
 
 功能：
 1. 歌曲选择：内置歌曲目录 + 文件对话框选任意音频
-2. 智能推理：若 <音频同目录>/<同名>.json 已存在 → 不显示推理按钮，直接可播放；
-   若不存在 → 显示「推理」按钮，后台线程调用 all-in-one 分析并落盘 json。
+2. 智能推理：若已有 <音频同目录>/<同名>.json → 直接可播放；
+   否则显示「Analyze」按钮，后台线程调 pipeline 分析并落盘 json。
 3. 可视化播放：波形 + 段落色块 + 强拍/拍线 + 游标（内嵌在同一个 tkinter 窗口）。
+4. 后处理可配置：分析完成后，勾选要启用的后处理方案（prechorus/spatiotemporal），
+   重新跑流水线并刷新可视化。
 
 推理设备：优先 CUDA，无 GPU 自动回退 CPU（见 auto_device()）。
 """
@@ -12,11 +19,8 @@
 from __future__ import annotations
 
 import bisect
-import json
-import os
 import sys
 import threading
-import time
 from pathlib import Path
 
 import numpy as np
@@ -27,7 +31,8 @@ _PKG_ROOT = Path(__file__).resolve().parent.parent
 if str(_PKG_ROOT) not in sys.path:
     sys.path.insert(0, str(_PKG_ROOT))
 
-from audio_structure_analyzer import AnalysisResult, run_postprocess
+from audio_structure_analyzer import available_processors as list_processors
+from audio_structure_analyzer import analyze_audio, build_result, find_result
 
 
 # ---- 常量 ----
@@ -79,22 +84,6 @@ def default_song_dir() -> Path:
     return ta if ta.is_dir() else here
 
 
-def json_path_for(audio: Path) -> Path:
-    return audio.with_suffix(".json")
-
-
-def _candidate_result_paths(audio: Path):
-    yield audio.with_suffix(".json")
-    yield audio.parent / "allin1" / f"{audio.stem}.json"
-
-
-def find_result(audio: Path) -> Path | None:
-    for p in _candidate_result_paths(audio):
-        if p.exists():
-            return p
-    return None
-
-
 def has_result(audio: Path) -> bool:
     return find_result(audio) is not None
 
@@ -114,40 +103,19 @@ def mmss(seconds: float) -> str:
     return f"{seconds // 60}:{seconds % 60:02d}"
 
 
-# ---- 推理（后台线程调用） ----
+# ---- 推理（后台线程调用 pipeline） ----
 
 def run_inference(audio: Path, device: str, progress_cb=None, done_cb=None):
-    from allin1_infer import analyze
-
     def _work():
         try:
             if progress_cb:
                 progress_cb(f"正在分离声部 + 分析（{device}）…")
-            results = analyze(
-                paths=[str(audio)],
-                model="harmonix-all",
-                device=device,
-                multiprocess=False,
-                keep_byproducts=False,
-            )
-            result = results[0] if isinstance(results, list) else results
-            data = {
-                "path": str(result.path),
-                "bpm": int(result.bpm),
-                "beats": [float(x) for x in result.beats],
-                "downbeats": [float(x) for x in result.downbeats],
-                "beat_positions": [int(x) for x in result.beat_positions],
-                "activation_fps": getattr(result, "activation_fps", None),
-                "segments": [
-                    {"start": s.start, "end": s.end, "label": s.label}
-                    for s in result.segments
-                ],
-            }
-            out = json_path_for(audio)
-            with open(out, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
+            result = analyze_audio(audio, device=device)
             if done_cb:
-                done_cb(True, f"推理完成：BPM={data['bpm']}，{len(data['segments'])} 段")
+                done_cb(
+                    True,
+                    f"推理完成：BPM={result.bpm}，{len(result.segments)} 段",
+                )
         except Exception as e:
             if done_cb:
                 done_cb(False, f"推理失败：{e}")
@@ -162,7 +130,7 @@ def run_inference(audio: Path, device: str, progress_cb=None, done_cb=None):
 class PlayerPanel:
     """内嵌到 tkinter 的波形播放面板，展示并播放一首歌的分析结果。"""
 
-    def __init__(self, parent, audio: Path, data: dict, on_status=None):
+    def __init__(self, parent, audio: Path, processors: list[str], on_status=None):
         import matplotlib
         matplotlib.use("TkAgg")
         import matplotlib.pyplot as plt
@@ -171,7 +139,7 @@ class PlayerPanel:
 
         self.parent = parent
         self.audio = audio
-        self.data = data
+        self.processors = list(processors)
         self.on_status = on_status
         self.sd = sd
 
@@ -182,30 +150,34 @@ class PlayerPanel:
         plt.rcParams["font.monospace"] = [MONO_FONT, "Consolas", "DejaVu Sans Mono"]
         plt.rcParams["axes.unicode_minus"] = False
 
-        segments = data["segments"]
-        self.beats = data.get("beats", [])
-        self.downbeats = data.get("downbeats", [])
-        self.beat_positions = data.get("beat_positions", [])
-        self.bpm = data.get("bpm", 0)
+        # 后端流水线：加载结果 + 音频波形 + 跑一组可配置后处理
+        result, y, sr, post = build_result(
+            audio,
+            processors=self.processors,
+            cache_dir=Path(__file__).resolve().parent.parent / "test_audio" / "stems_npy",
+        )
+        self.result = result
+        self.post = post  # {方案名: PostProcessResult}
 
-        self.y, self.sr = librosa_load(audio)
+        segments = [s.to_dict() for s in result.segments]
+        self.beats = result.beats
+        self.downbeats = result.downbeats
+        self.beat_positions = result.beat_positions
+        self.bpm = result.bpm
+
+        self.y = y.astype(np.float32)
+        self.sr = sr
         self.duration = len(self.y) / self.sr
-        self.y = self.y.astype(np.float32)
         self.ymax = float(np.max(np.abs(self.y))) if len(self.y) else 1.0
 
         self.seg_starts = [s["start"] for s in segments]
         self.seg_ends = [s["end"] for s in segments]
         self.seg_labels = [s["label"] for s in segments]
 
-        # 后处理（插件式）：把 data 转成 AnalysisResult 后跑所有已注册方案
-        analysis = AnalysisResult.from_dict(data)
-        self.postprocess_results = {}
-        self.prechorus_candidates = {}
-        for name in ("prechorus",):
-            res = run_postprocess(name, analysis, y=self.y, sr=self.sr)
-            self.postprocess_results[name] = res
-            if name == "prechorus":
-                self.prechorus_candidates = res.by_segment()
+        # 后处理候选：按方案聚合「段落下标 -> 候选」，供可视化高亮
+        self.candidates_by_segment = {}  # {方案名: {seg_index: candidate}}
+        for name, res in post.items():
+            self.candidates_by_segment[name] = res.by_segment()
 
         self._build_figure()
         self.canvas = FigureCanvasTkAgg(self.fig, master=parent)
@@ -277,25 +249,11 @@ class PlayerPanel:
             color = LABEL_COLORS.get(self.seg_labels[i], "#5f6b7a")
             ax.axvspan(self.seg_starts[i], self.seg_ends[i], color=color, alpha=0.14, zorder=1)
 
-            # pre-chorus 候选：加虚线边框 + 高亮标注
-            if i in self.prechorus_candidates:
-                cand = self.prechorus_candidates[i]
-                conf = cand.confidence
-                # 虚线边框标出候选区域
-                ax.axvspan(
-                    self.seg_starts[i], self.seg_ends[i],
-                    facecolor="none", edgecolor="#ffd166", linewidth=1.4,
-                    linestyle="--", alpha=0.9, zorder=5,
-                )
-                mid = (self.seg_starts[i] + self.seg_ends[i]) / 2
-                ax.text(
-                    mid, self.ymax * 0.72,
-                    f"pre-chorus? {conf*100:.0f}%",
-                    ha="center", va="top", fontsize=10,
-                    color="#ffd166", zorder=6,
-                    bbox=dict(boxstyle="round,pad=0.25", fc="#1c2230", ec="#ffd166", alpha=0.85),
-                )
-                continue
+            # 各后处理方案的候选高亮（不同方案用不同颜色，堆叠展示）
+            for proc_name, cand_map in self.candidates_by_segment.items():
+                if i in cand_map:
+                    cand = cand_map[i]
+                    self._draw_candidate(i, cand, proc_name)
 
             mid = (self.seg_starts[i] + self.seg_ends[i]) / 2
             ax.text(mid, self.ymax * 0.88, self.seg_labels[i], ha="center", va="top",
@@ -320,6 +278,33 @@ class PlayerPanel:
         ax.set_ylabel("Amplitude")
         title_text = f"{self.audio.stem}   ·   BPM {self.bpm}"
         ax.set_title(title_text, color=FG, fontsize=13, pad=12, loc="left")
+
+    def _draw_candidate(self, seg_idx: int, cand, proc_name: str):
+        """在段落上绘制某后处理方案的候选高亮（虚线框 + 置信度标签）。"""
+        # 每个方案一个高亮色，便于区分多个方案叠加
+        colors = {
+            "prechorus": "#ffd166",       # 黄（位置+能量判据）
+            "spatiotemporal": "#5ce1a6",  # 绿（时空/配器判据）
+        }
+        hl = colors.get(proc_name, "#ffd166")
+        ax = self.ax
+        ax.axvspan(
+            self.seg_starts[seg_idx], self.seg_ends[seg_idx],
+            facecolor="none", edgecolor=hl, linewidth=1.4,
+            linestyle="--", alpha=0.9, zorder=5,
+        )
+        mid = (self.seg_starts[seg_idx] + self.seg_ends[seg_idx]) / 2
+        conf = getattr(cand, "confidence", 0.0)
+        # 不同方案标签纵向错开，避免重叠
+        base_y = 0.72
+        offset = {"prechorus": 0.0, "spatiotemporal": -0.14}.get(proc_name, 0.0)
+        ax.text(
+            mid, self.ymax * (base_y + offset),
+            f"{proc_name} {conf*100:.0f}%",
+            ha="center", va="top", fontsize=9,
+            color=hl, zorder=6,
+            bbox=dict(boxstyle="round,pad=0.25", fc="#1c2230", ec=hl, alpha=0.85),
+        )
 
     def _bind_events(self):
         self.canvas.mpl_connect("key_press_event", self._on_key)
@@ -498,12 +483,6 @@ class PlayerPanel:
             pass
 
 
-def librosa_load(audio: Path):
-    import librosa
-    y, sr = librosa.load(str(audio), sr=22050, mono=True)
-    return y, sr
-
-
 # ---- GUI 主窗口 ----
 
 class App:
@@ -530,6 +509,11 @@ class App:
         self.inferring = False
         self.panel: PlayerPanel | None = None
         self._closing = False
+
+        # 后处理方案勾选状态（默认全部启用）
+        self.processor_vars = {}
+        for name in list_processors():
+            self.processor_vars[name] = tk.BooleanVar(value=True)
 
         self._build_ui()
         self.refresh_songs()
@@ -679,6 +663,20 @@ class App:
         self.tree.bind("<Double-1>", lambda e: self.load_selected())
         self.tree.bind("<<TreeviewSelect>>", self._on_select)
 
+        # ---- 后处理方案勾选区（分析完成后可配置） ----
+        pp = ttk.Frame(self.content, padding=(10, 4, 10, 0))
+        pp.pack(fill="x")
+        ttk.Label(pp, text="POST-PROCESS", style="Accent.TLabel").pack(side="left")
+        for name, var in self.processor_vars.items():
+            cb = ttk.Checkbutton(
+                pp, text=name, variable=var,
+                command=self._on_postprocess_change,
+            )
+            cb.pack(side="left", padx=8)
+        ttk.Button(
+            pp, text="Re-run", command=self._rerun_postprocess
+        ).pack(side="left", padx=12)
+
         # ---- 底部：波形播放区 ----
         self.player_frame = ttk.Frame(self.content, padding=(10, 6, 10, 10))
         self.player_frame.pack(fill="both", expand=True)
@@ -753,12 +751,9 @@ class App:
         p = self.selected_audio()
         if p is None:
             return
-        jp = find_result(p)
-        if jp is None:
+        if find_result(p) is None:
             self.messagebox.showinfo("Notice", "This song has no analysis result yet. Analyze first.")
             return
-        with open(jp, "r", encoding="utf-8") as f:
-            data = json.load(f)
 
         self.status_var.set(f"Loading: {p.name}")
 
@@ -768,9 +763,28 @@ class App:
             self.panel = None
         self.placeholder.pack_forget()
 
-        self.panel = PlayerPanel(self.player_frame, p, data, on_status=self.status_var.set)
+        processors = self._selected_processors()
+        self.panel = PlayerPanel(
+            self.player_frame, p, processors, on_status=self.status_var.set
+        )
         self.btn_play.config(state="normal")
         self.status_var.set(f"Loaded: {p.name}")
+
+    def _selected_processors(self) -> list[str]:
+        """返回当前勾选启用的后处理方案名列表。"""
+        return [name for name, var in self.processor_vars.items() if var.get()]
+
+    def _on_postprocess_change(self):
+        """勾选变化时，若有已加载面板则标记待重跑（由 Re-run 按钮触发）。"""
+        pass
+
+    def _rerun_postprocess(self):
+        """按当前勾选重新跑后处理并刷新可视化（复用已加载的歌曲）。"""
+        p = self.current_audio
+        if p is None or find_result(p) is None:
+            self.status_var.set("Select an analyzed song first")
+            return
+        self.load_selected()
 
     def toggle_play(self):
         if self.panel is None:

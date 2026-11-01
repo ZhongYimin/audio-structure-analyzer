@@ -21,8 +21,14 @@ from .postprocess import (  # noqa: F401
     run_all,
     run_postprocess,
 )
+from .pipeline import (  # noqa: F401
+    analyze_audio,
+    build_result,
+    find_result,
+    load_audio,
+)
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"
 
 __all__ = [
     "HARMONIX_LABELS",
@@ -39,5 +45,10 @@ __all__ = [
     "available_processors",
     "run_postprocess",
     "run_all",
+    # 流水线（后端编排层）
+    "analyze_audio",
+    "build_result",
+    "find_result",
+    "load_audio",
     "__version__",
 ]
