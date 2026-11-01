@@ -1,17 +1,16 @@
-"""all-in-one 结构分析播放器（纯前端：选歌 + 推理 + 播放 + 后处理展示）。
+"""all-in-one 结构分析播放器（纯前端：选歌 + 预处理 + 播放 + 后处理展示）。
 
-定位：本文件是「前端」，只负责 UI 展示与播放控制。所有分析、落盘、后处理
-编排逻辑都在后端包 ``audio_structure_analyzer``（尤其 ``pipeline`` 模块）里，
-前端通过 pipeline 的少数几个入口调用，不直接接触 ``allin1_infer`` / Demucs /
-后处理注册等实现细节。
+定位：本文件是「前端」，只负责 UI 展示与播放控制。所有分析、后处理、落盘
+都在后端包 ``audio_structure_analyzer``（尤其 ``pipeline`` 模块）里离线完成，
+产出**一份合并 JSON**（结构 + 后处理）。播放器点击歌曲时只读这份 JSON 纯加载。
 
 功能：
 1. 歌曲选择：内置歌曲目录 + 文件对话框选任意音频
-2. 智能推理：若已有 <音频同目录>/<同名>.json → 直接可播放；
-   否则显示「Analyze」按钮，后台线程调 pipeline 分析并落盘 json。
+2. 预处理：若歌曲还没有合并结果 JSON → 显示「Preprocess」按钮，后台线程跑
+   pipeline.preprocess（分析 + 后处理）并落盘；已有则直接可播放。
 3. 可视化播放：波形 + 段落色块 + 强拍/拍线 + 游标（内嵌在同一个 tkinter 窗口）。
-4. 后处理可配置：分析完成后，勾选要启用的后处理方案（prechorus/spatiotemporal），
-   重新跑流水线并刷新可视化。
+4. 后处理展示开关：所有方案结果已并入 JSON，勾选/取消只是显示/隐藏对应高亮，
+   零计算、即时生效。
 
 推理设备：优先 CUDA，无 GPU 自动回退 CPU（见 auto_device()）。
 """
@@ -32,7 +31,7 @@ if str(_PKG_ROOT) not in sys.path:
     sys.path.insert(0, str(_PKG_ROOT))
 
 from audio_structure_analyzer import available_processors as list_processors
-from audio_structure_analyzer import analyze_audio, build_result, find_result
+from audio_structure_analyzer import find_result, load_bundle, preprocess
 
 
 # ---- 常量 ----
@@ -103,22 +102,24 @@ def mmss(seconds: float) -> str:
     return f"{seconds // 60}:{seconds % 60:02d}"
 
 
-# ---- 推理（后台线程调用 pipeline） ----
+# ---- 预处理（后台线程调用 pipeline.preprocess） ----
 
-def run_inference(audio: Path, device: str, progress_cb=None, done_cb=None):
+def run_inference(audio: Path, device: str, processors: list[str], progress_cb=None, done_cb=None):
     def _work():
         try:
             if progress_cb:
-                progress_cb(f"正在分离声部 + 分析（{device}）…")
-            result = analyze_audio(audio, device=device)
+                progress_cb(f"预处理中：分析 + 后处理（{device}）…")
+            result = preprocess(audio, processors=processors, device=device)
+            n_pp = len(result.postprocess)
             if done_cb:
                 done_cb(
                     True,
-                    f"推理完成：BPM={result.bpm}，{len(result.segments)} 段",
+                    f"预处理完成：BPM={result.bpm}，{len(result.segments)} 段，"
+                    f"{n_pp} 个后处理方案",
                 )
         except Exception as e:
             if done_cb:
-                done_cb(False, f"推理失败：{e}")
+                done_cb(False, f"预处理失败：{e}")
 
     t = threading.Thread(target=_work, daemon=True)
     t.start()
@@ -128,9 +129,13 @@ def run_inference(audio: Path, device: str, progress_cb=None, done_cb=None):
 # ---- 内嵌播放面板（matplotlib canvas 嵌入 tkinter） ----
 
 class PlayerPanel:
-    """内嵌到 tkinter 的波形播放面板，展示并播放一首歌的分析结果。"""
+    """内嵌到 tkinter 的波形播放面板，展示并播放一首歌的分析结果。
 
-    def __init__(self, parent, audio: Path, processors: list[str], on_status=None):
+    纯加载：所有重计算（分析 + 后处理）已在预处理阶段并入 JSON，本面板
+    只读那份 JSON + 加载波形，点击秒开、不做任何计算。
+    """
+
+    def __init__(self, parent, audio: Path, enabled_processors: list[str], on_status=None):
         import matplotlib
         matplotlib.use("TkAgg")
         import matplotlib.pyplot as plt
@@ -139,7 +144,7 @@ class PlayerPanel:
 
         self.parent = parent
         self.audio = audio
-        self.processors = list(processors)
+        self.enabled_processors = list(enabled_processors)
         self.on_status = on_status
         self.sd = sd
 
@@ -150,34 +155,36 @@ class PlayerPanel:
         plt.rcParams["font.monospace"] = [MONO_FONT, "Consolas", "DejaVu Sans Mono"]
         plt.rcParams["axes.unicode_minus"] = False
 
-        # 后端流水线：加载结果 + 音频波形 + 跑一组可配置后处理
-        result, y, sr, post = build_result(
-            audio,
-            processors=self.processors,
-            cache_dir=Path(__file__).resolve().parent.parent / "test_audio" / "stems_npy",
-        )
+        # 纯加载：读合并 JSON（结构 + 后处理），不跑任何计算
+        result = load_bundle(audio)
         self.result = result
-        self.post = post  # {方案名: PostProcessResult}
-
-        segments = [s.to_dict() for s in result.segments]
+        self.bpm = result.bpm
         self.beats = result.beats
         self.downbeats = result.downbeats
         self.beat_positions = result.beat_positions
-        self.bpm = result.bpm
 
-        self.y = y.astype(np.float32)
-        self.sr = sr
+        self.seg_starts = [s.start for s in result.segments]
+        self.seg_ends = [s.end for s in result.segments]
+        self.seg_labels = [s.label for s in result.segments]
+
+        # 后处理候选（已并入 JSON）：{方案名: {seg_index: 候选dict}}
+        # 只加载「当前启用」的方案，未启用的不显示（数据仍在 result.postprocess 里）
+        self.candidates_by_segment = {}
+        for name in self.enabled_processors:
+            pp = result.postprocess.get(name)
+            if not pp:
+                continue
+            cand_map = {}
+            for c in pp.get("candidates", []):
+                cand_map[c["segment_index"]] = c
+            self.candidates_by_segment[name] = cand_map
+
+        # 加载波形（唯一可能稍慢的 IO，但远快于任何计算）
+        from audio_structure_analyzer import load_audio
+        self.y, self.sr = load_audio(audio)
+        self.y = self.y.astype(np.float32)
         self.duration = len(self.y) / self.sr
         self.ymax = float(np.max(np.abs(self.y))) if len(self.y) else 1.0
-
-        self.seg_starts = [s["start"] for s in segments]
-        self.seg_ends = [s["end"] for s in segments]
-        self.seg_labels = [s["label"] for s in segments]
-
-        # 后处理候选：按方案聚合「段落下标 -> 候选」，供可视化高亮
-        self.candidates_by_segment = {}  # {方案名: {seg_index: candidate}}
-        for name, res in post.items():
-            self.candidates_by_segment[name] = res.by_segment()
 
         self._build_figure()
         self.canvas = FigureCanvasTkAgg(self.fig, master=parent)
@@ -294,7 +301,7 @@ class PlayerPanel:
             linestyle="--", alpha=0.9, zorder=5,
         )
         mid = (self.seg_starts[seg_idx] + self.seg_ends[seg_idx]) / 2
-        conf = getattr(cand, "confidence", 0.0)
+        conf = cand.get("confidence", 0.0) if isinstance(cand, dict) else getattr(cand, "confidence", 0.0)
         # 不同方案标签纵向错开，避免重叠
         base_y = 0.72
         offset = {"prechorus": 0.0, "spatiotemporal": -0.14}.get(proc_name, 0.0)
@@ -305,6 +312,32 @@ class PlayerPanel:
             color=hl, zorder=6,
             bbox=dict(boxstyle="round,pad=0.25", fc="#1c2230", ec=hl, alpha=0.85),
         )
+
+    def set_processors(self, enabled: list[str]):
+        """切换启用的后处理方案（纯显示切换，数据已在内存，零计算）。"""
+        self.enabled_processors = list(enabled)
+        # 从已加载的 result.postprocess 重新聚合候选
+        self.candidates_by_segment = {}
+        for name in self.enabled_processors:
+            pp = self.result.postprocess.get(name)
+            if not pp:
+                continue
+            cand_map = {}
+            for c in pp.get("candidates", []):
+                cand_map[c["segment_index"]] = c
+            self.candidates_by_segment[name] = cand_map
+        # 重绘（去掉旧高亮，重画当前高亮）
+        self._redraw()
+
+    def _redraw(self):
+        """重绘图形以反映最新的候选高亮。"""
+        try:
+            self.ax.cla()
+            self._build_figure()
+            self.canvas.draw()
+            self.state["_blit_ready"] = False
+        except Exception:
+            pass
 
     def _bind_events(self):
         self.canvas.mpl_connect("key_press_event", self._on_key)
@@ -673,9 +706,6 @@ class App:
                 command=self._on_postprocess_change,
             )
             cb.pack(side="left", padx=8)
-        ttk.Button(
-            pp, text="Re-run", command=self._rerun_postprocess
-        ).pack(side="left", padx=12)
 
         # ---- 底部：波形播放区 ----
         self.player_frame = ttk.Frame(self.content, padding=(10, 6, 10, 10))
@@ -775,16 +805,9 @@ class App:
         return [name for name, var in self.processor_vars.items() if var.get()]
 
     def _on_postprocess_change(self):
-        """勾选变化时，若有已加载面板则标记待重跑（由 Re-run 按钮触发）。"""
-        pass
-
-    def _rerun_postprocess(self):
-        """按当前勾选重新跑后处理并刷新可视化（复用已加载的歌曲）。"""
-        p = self.current_audio
-        if p is None or find_result(p) is None:
-            self.status_var.set("Select an analyzed song first")
-            return
-        self.load_selected()
+        """勾选变化时即时切换高亮显示（数据已在面板内存，零计算）。"""
+        if self.panel is not None:
+            self.panel.set_processors(self._selected_processors())
 
     def toggle_play(self):
         if self.panel is None:
@@ -815,7 +838,10 @@ class App:
                 self.btn_infer.config(state="normal")
                 self.messagebox.showerror("Analyze failed", msg)
 
-        run_inference(p, auto_device(), progress_cb=self.status_var.set, done_cb=done)
+        run_inference(
+            p, auto_device(), self._selected_processors(),
+            progress_cb=self.status_var.set, done_cb=done,
+        )
 
     def run(self):
         self.root.mainloop()

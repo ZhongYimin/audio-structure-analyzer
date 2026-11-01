@@ -22,10 +22,10 @@ from .postprocess import (  # noqa: F401
     run_postprocess,
 )
 from .pipeline import (  # noqa: F401
-    analyze_audio,
-    build_result,
     find_result,
     load_audio,
+    load_bundle,
+    preprocess,
 )
 
 __version__ = "0.7.0"
@@ -46,8 +46,8 @@ __all__ = [
     "run_postprocess",
     "run_all",
     # 流水线（后端编排层）
-    "analyze_audio",
-    "build_result",
+    "preprocess",
+    "load_bundle",
     "find_result",
     "load_audio",
     "__version__",

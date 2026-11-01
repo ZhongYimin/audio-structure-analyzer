@@ -23,7 +23,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import Dict, List, Optional, Union
 
 PathLike = Union[str, Path]
 
@@ -53,7 +53,11 @@ class Segment:
 
 @dataclass
 class AnalysisResult:
-    """一首歌的 all-in-one 分析结果。"""
+    """一首歌的 all-in-one 分析结果。
+
+    除结构分析本身外，还可携带后处理结果（``postprocess`` 字段），
+    使「结构 + 后处理」合并进同一份 JSON，播放器只读这一份即可渲染。
+    """
 
     path: str
     bpm: int
@@ -62,13 +66,14 @@ class AnalysisResult:
     beat_positions: List[int] = field(default_factory=list)
     segments: List[Segment] = field(default_factory=list)
     activation_fps: Optional[float] = None
+    postprocess: Dict[str, dict] = field(default_factory=dict)
 
     @property
     def duration(self) -> float:
         return self.segments[-1].end if self.segments else 0.0
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "path": self.path,
             "bpm": self.bpm,
             "beats": self.beats,
@@ -77,6 +82,9 @@ class AnalysisResult:
             "activation_fps": self.activation_fps,
             "segments": [s.to_dict() for s in self.segments],
         }
+        if self.postprocess:
+            d["postprocess"] = self.postprocess
+        return d
 
     def save(self, path: PathLike) -> Path:
         """把结果写为 JSON（与 all-in-one 原生 JSON 兼容）。"""
@@ -97,6 +105,7 @@ class AnalysisResult:
             beat_positions=[int(x) for x in data.get("beat_positions", [])],
             segments=[Segment(start=s["start"], end=s["end"], label=s["label"]) for s in data["segments"]],
             activation_fps=data.get("activation_fps"),
+            postprocess=data.get("postprocess", {}),
         )
 
 
