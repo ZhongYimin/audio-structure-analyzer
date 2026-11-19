@@ -31,7 +31,7 @@ if str(_PKG_ROOT) not in sys.path:
     sys.path.insert(0, str(_PKG_ROOT))
 
 from audio_structure_analyzer import available_processors as list_processors
-from audio_structure_analyzer import find_result, load_bundle, preprocess
+from audio_structure_analyzer import find_result, load_bundle, preprocess, preprocess_edm
 
 
 # ---- 常量 ----
@@ -47,6 +47,16 @@ LABEL_COLORS = {
     "break": "#f5c84c",
     "inst": "#2de2b8",
     "solo": "#ff8a5c",
+}
+
+# EDM 结构标签配色（EDMFormer 6 类语义）
+EDM_LABEL_COLORS = {
+    "intro": "#39d0e8",     # 青（引子）
+    "buildup": "#ffa94d",   # 橙（蓄力）
+    "drop": "#ff5fa2",      # 粉红（高潮）
+    "breakdown": "#a78bfa", # 紫（低谷）
+    "outro": "#8892a0",     # 灰（尾声）
+    "silence": "#30363d",   # 深灰（静音）
 }
 
 AUDIO_EXTS = {".wav", ".mp3", ".flac", ".m4a", ".ogg", ".aiff", ".aac"}
@@ -65,8 +75,8 @@ THEME = {
     "select": "#2d3a4a",     # 选中
 }
 
-# 背景图路径（全窗口铺底用）
-MIKU_BG = Path(__file__).resolve().parent.parent / "assets" / "miku_bg.jpg"
+# 可选背景图（全窗口铺底用，不存在时自动降级为纯色背景）
+BG_IMAGE = Path(__file__).resolve().parent.parent / "assets" / "background.jpg"
 
 # 字体：英文用 JetBrains Mono，中文回退到微软雅黑（保证中文歌名正常显示）
 MONO_FONT = "JetBrains Mono"
@@ -104,22 +114,45 @@ def mmss(seconds: float) -> str:
 
 # ---- 预处理（后台线程调用 pipeline.preprocess） ----
 
-def run_inference(audio: Path, device: str, processors: list[str], progress_cb=None, done_cb=None):
+def run_inference(audio: Path, device: str, processors: list[str], analysis: str = "structure", progress_cb=None, done_cb=None):
+    import time as _time
+
     def _work():
+        t0 = _time.time()
         try:
-            if progress_cb:
-                progress_cb(f"预处理中：分析 + 后处理（{device}）…")
-            result = preprocess(audio, processors=processors, device=device)
-            n_pp = len(result.postprocess)
-            if done_cb:
-                done_cb(
-                    True,
-                    f"预处理完成：BPM={result.bpm}，{len(result.segments)} 段，"
-                    f"{n_pp} 个后处理方案",
-                )
+            if analysis == "edm":
+                # EDM 分析：all-in-one 出节奏 + EDMFormer 出 EDM 段落
+                def _edm_progress(*args):
+                    # EDMFormer 回调签名 (progress: float, desc: str)
+                    if progress_cb:
+                        el = _time.time() - t0
+                        if len(args) >= 2 and args[1]:
+                            progress_cb(f"EDM 分析中 [{el:.0f}s] {args[1]}")
+                        elif args:
+                            progress_cb(f"EDM 分析中 [{el:.0f}s] {args[0]:.0%}")
+
+                result = preprocess_edm(audio, device=device, progress_cb=_edm_progress)
+                n = len(result.edm_segments)
+                if done_cb:
+                    done_cb(True, f"EDM 分析完成：BPM={result.bpm}，{n} 段 EDM 结构")
+            else:
+                # all-in-one 结构分析 + 后处理
+                def _struct_progress(msg):
+                    if progress_cb:
+                        el = _time.time() - t0
+                        progress_cb(f"[{el:.0f}s] {msg}")
+
+                result = preprocess(audio, processors=processors, device=device, progress_cb=_struct_progress)
+                n_pp = len(result.postprocess)
+                if done_cb:
+                    done_cb(
+                        True,
+                        f"预处理完成：BPM={result.bpm}，{len(result.segments)} 段，"
+                        f"{n_pp} 个后处理方案",
+                    )
         except Exception as e:
             if done_cb:
-                done_cb(False, f"预处理失败：{e}")
+                done_cb(False, f"分析失败：{e}")
 
     t = threading.Thread(target=_work, daemon=True)
     t.start()
@@ -147,6 +180,8 @@ class PlayerPanel:
         self.enabled_processors = list(enabled_processors)
         self.on_status = on_status
         self.sd = sd
+        # 分析方式：由 JSON 的 analysis_type 决定（structure=all-in-one，edm=EDMFormer）
+        self.view_mode = "structure"
 
         plt.rcParams["font.sans-serif"] = [
             CJK_FONT, MONO_FONT, "Segoe UI", "Consolas", "DejaVu Sans Mono"
@@ -167,6 +202,15 @@ class PlayerPanel:
         self.seg_ends = [s.end for s in result.segments]
         self.seg_labels = [s.label for s in result.segments]
 
+        # EDM 结构段（EDMFormer 结果，若已并入 JSON）
+        self.edm_seg_starts = [s.start for s in result.edm_segments]
+        self.edm_seg_ends = [s.end for s in result.edm_segments]
+        self.edm_seg_labels = [s.label for s in result.edm_segments]
+
+        # 根据 JSON 的 analysis_type 自动决定用哪套段落渲染
+        if result.analysis_type == "edm" and self.edm_seg_starts:
+            self.view_mode = "edm"
+
         # 后处理候选（已并入 JSON）：{方案名: {seg_index: 候选dict}}
         # 只加载「当前启用」的方案，未启用的不显示（数据仍在 result.postprocess 里）
         self.candidates_by_segment = {}
@@ -185,6 +229,9 @@ class PlayerPanel:
         self.y = self.y.astype(np.float32)
         self.duration = len(self.y) / self.sr
         self.ymax = float(np.max(np.abs(self.y))) if len(self.y) else 1.0
+
+        # 当前正在播放/游标所在的段落索引（-1 = 无）
+        self._active_idx = -1
 
         self._build_figure()
         self.canvas = FigureCanvasTkAgg(self.fig, master=parent)
@@ -215,11 +262,11 @@ class PlayerPanel:
         ax = self.ax
         ax.set_facecolor(BG)
 
-        # 初音背景（压暗版），与全窗口背景保持一致，铺满绘图区
-        if MIKU_BG.exists():
+        # 可选背景图（压暗版），与全窗口背景保持一致，铺满绘图区
+        if BG_IMAGE.exists():
             try:
                 from PIL import Image, ImageEnhance
-                _im = Image.open(MIKU_BG).convert("RGB")
+                _im = Image.open(BG_IMAGE).convert("RGB")
                 _im = ImageEnhance.Brightness(_im).enhance(0.45)
                 _im = ImageEnhance.Color(_im).enhance(0.85)
                 ax.imshow(
@@ -251,20 +298,49 @@ class PlayerPanel:
         ax.plot(t_plot, y_plot, color="#7fd6f0", linewidth=0.7, alpha=0.95, zorder=3)
         ax.fill_between(t_plot, y_plot, 0, color=THEME["accent"], alpha=0.12, linewidth=0, zorder=2)
 
-        # 段落色块 + 标签
-        for i in range(len(self.seg_starts)):
-            color = LABEL_COLORS.get(self.seg_labels[i], "#5f6b7a")
-            ax.axvspan(self.seg_starts[i], self.seg_ends[i], color=color, alpha=0.14, zorder=1)
+        # 段落色块 + 标签（按当前视图：all-in-one 结构 或 EDM 结构）
+        # 保存每个段落的色块与标签引用，播放时把「当前段落」高亮、其余淡色
+        self._seg_spans = []   # axvspan 色块列表（按顺序）
+        self._seg_texts = []   # 段落标签 text 列表（按顺序）
+        self._active_span = None  # 当前段落的高亮覆盖层（描边）
+        self._active_text = None  # 当前段落的大号标签
 
-            # 各后处理方案的候选高亮（不同方案用不同颜色，堆叠展示）
-            for proc_name, cand_map in self.candidates_by_segment.items():
-                if i in cand_map:
-                    cand = cand_map[i]
-                    self._draw_candidate(i, cand, proc_name)
+        if self.view_mode == "edm" and self.edm_seg_starts:
+            # EDM 视图：渲染 EDMFormer 的 EDM 语义段
+            for i in range(len(self.edm_seg_starts)):
+                color = EDM_LABEL_COLORS.get(self.edm_seg_labels[i], "#5f6b7a")
+                sp = ax.axvspan(self.edm_seg_starts[i], self.edm_seg_ends[i], color=color, alpha=0.18, zorder=1)
+                mid = (self.edm_seg_starts[i] + self.edm_seg_ends[i]) / 2
+                tx = ax.text(mid, self.ymax * 0.88, self.edm_seg_labels[i], ha="center", va="top",
+                             fontsize=11, color=color, zorder=6)
+                self._seg_spans.append(sp)
+                self._seg_texts.append(tx)
+        else:
+            # all-in-one 视图：渲染 Harmonix 流行标签段 + 后处理高亮
+            for i in range(len(self.seg_starts)):
+                color = LABEL_COLORS.get(self.seg_labels[i], "#5f6b7a")
+                sp = ax.axvspan(self.seg_starts[i], self.seg_ends[i], color=color, alpha=0.14, zorder=1)
 
-            mid = (self.seg_starts[i] + self.seg_ends[i]) / 2
-            ax.text(mid, self.ymax * 0.88, self.seg_labels[i], ha="center", va="top",
-                    fontsize=11, color=color, zorder=6)
+                # 各后处理方案的候选高亮（不同方案用不同颜色，堆叠展示）
+                for proc_name, cand_map in self.candidates_by_segment.items():
+                    if i in cand_map:
+                        cand = cand_map[i]
+                        self._draw_candidate(i, cand, proc_name)
+
+                mid = (self.seg_starts[i] + self.seg_ends[i]) / 2
+                tx = ax.text(mid, self.ymax * 0.88, self.seg_labels[i], ha="center", va="top",
+                             fontsize=11, color=color, zorder=6)
+                self._seg_spans.append(sp)
+                self._seg_texts.append(tx)
+
+        # 当前段落的高亮层（初始隐藏，播放/seek 时由 _apply_active_seg 更新）
+        self._active_span = ax.axvspan(0, 0, facecolor="none", edgecolor=THEME["fg"],
+                                       linewidth=2.0, alpha=0.0, zorder=7)
+        self._active_text = ax.text(0, self.ymax * 0.88, "", ha="center", va="top",
+                                    fontsize=14, color=THEME["fg"], zorder=8,
+                                    fontweight="bold")
+        # 重建后复位激活索引，避免 _apply_active_seg 因索引未变而跳过更新
+        self._active_idx = -1
 
         # 拍线
         for b in self.beats:
@@ -284,6 +360,9 @@ class PlayerPanel:
         ax.set_xlabel("Time (s)")
         ax.set_ylabel("Amplitude")
         title_text = f"{self.audio.stem}   ·   BPM {self.bpm}"
+        # 分析方式视图标识
+        if self.view_mode == "edm":
+            title_text += "   ·   [EDM structure]"
         # 附加流派标签（style 方案，MAEST 细粒度多标签，若有）
         style_pp = self.result.postprocess.get("style")
         if style_pp:
@@ -393,10 +472,58 @@ class PlayerPanel:
         self.timer.start()
 
     def get_seg_idx(self, pos):
+        if self.view_mode == "edm" and self.edm_seg_starts:
+            for i in range(len(self.edm_seg_starts)):
+                if self.edm_seg_starts[i] <= pos < self.edm_seg_ends[i]:
+                    return i
+            return 0 if pos < self.edm_seg_starts[0] else len(self.edm_seg_starts) - 1
         for i in range(len(self.seg_starts)):
             if self.seg_starts[i] <= pos < self.seg_ends[i]:
                 return i
         return 0 if pos < self.seg_starts[0] else len(self.seg_starts) - 1
+
+    def _active_seg_coords(self):
+        """返回当前视图下段落的 (starts, ends, labels) 三元组。"""
+        if self.view_mode == "edm" and self.edm_seg_starts:
+            return self.edm_seg_starts, self.edm_seg_ends, self.edm_seg_labels
+        return self.seg_starts, self.seg_ends, self.seg_labels
+
+    def _apply_active_seg(self, idx):
+        """把第 idx 段标记为「当前播放段落」：高亮色块 + 描边 + 放大标签。
+
+        其余段落恢复淡色；idx < 0 时全部恢复默认（无高亮）。
+        仅在段落索引变化时调用（见 _refresh_info），避免每帧重复绘制。
+        """
+        if idx == self._active_idx:
+            return
+        self._active_idx = idx
+
+        starts, ends, labels = self._active_seg_coords()
+        n = len(starts)
+
+        for i in range(n):
+            span = self._seg_spans[i]
+            txt = self._seg_texts[i]
+            if i == idx:
+                # 当前段落：色块更实 + 标签放大加粗
+                span.set_alpha(0.42)
+                txt.set_fontsize(13)
+                txt.set_fontweight("bold")
+            else:
+                span.set_alpha(0.14)
+                txt.set_fontsize(11)
+                txt.set_fontweight("normal")
+
+        if 0 <= idx < n:
+            # 描边覆盖 + 大标签落在当前段落中间（axvspan 是 Rectangle，y 为 axes 0~1）
+            self._active_span.set_bounds(starts[idx], 0.0, ends[idx] - starts[idx], 1.0)
+            self._active_span.set_alpha(1.0)
+            self._active_text.set_position(((starts[idx] + ends[idx]) / 2, self.ymax * 0.95))
+            self._active_text.set_text(labels[idx].upper())
+            self._active_text.set_alpha(1.0)
+        else:
+            self._active_span.set_alpha(0.0)
+            self._active_text.set_alpha(0.0)
 
     def find_beat(self, pos):
         return bisect.bisect_right(self.beats, pos) - 1
@@ -433,8 +560,12 @@ class PlayerPanel:
             self.cursor.set_xdata([pos, pos])
             idx = self.get_seg_idx(pos)
             bi = self.find_beat(pos)
-            if 0 <= idx < len(self.seg_labels):
-                s_label = self.seg_labels[idx]
+            if self.view_mode == "edm" and self.edm_seg_labels:
+                labels = self.edm_seg_labels
+            else:
+                labels = self.seg_labels
+            if 0 <= idx < len(labels):
+                s_label = labels[idx]
             else:
                 s_label = "?"
             pos_label = self.beat_positions[bi] if 0 <= bi < len(self.beat_positions) else 0
@@ -442,6 +573,12 @@ class PlayerPanel:
                 f"TIME {mmss(pos)} / {mmss(self.duration)}   SEC {s_label.upper():<6}   "
                 f"BEAT {bi+1}/{len(self.beats)} (pos {pos_label})   BPM {self.bpm}"
             )
+            # 当前段落高亮：仅在跨越段落边界时更新（其余帧由 _apply_active_seg 内部短路）
+            changed = (idx != self._active_idx)
+            self._apply_active_seg(idx)
+            if changed:
+                # 段落变化 → 下一帧整帧重绘，让高亮色块正确刷新
+                self.state["_blit_ready"] = False
         except Exception:
             pass
 
@@ -469,6 +606,9 @@ class PlayerPanel:
             canvas.restore_region(self.state["_bg"])
             self.ax.draw_artist(self.cursor)
             self.ax.draw_artist(self.info)
+            # 当前段落高亮层（描边 + 大标签）也随帧重绘
+            self.ax.draw_artist(self._active_span)
+            self.ax.draw_artist(self._active_text)
             canvas.blit(self.ax.bbox)
         except Exception:
             # 任何异常都不应中断 timer，避免画面停止更新
@@ -591,6 +731,8 @@ class App:
 
         # 关闭窗口时务必停止音频流，避免后台还在播
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        # 窗口获得焦点时刷新歌曲状态（外部增删 JSON 后切回窗口即同步）
+        self.root.bind("<FocusIn>", self._on_focus)
 
     def _on_close(self):
         self._closing = True
@@ -598,14 +740,31 @@ class App:
             self.panel.destroy()
         self.root.destroy()
 
+    def _on_focus(self, event=None):
+        """窗口获得焦点时，按本地 JSON 刷新全部歌曲的状态显示。
+
+        覆盖「在播放器之外删除/新增结果 JSON」后切回窗口的场景，
+        让列表状态与本地文件实时一致。
+        """
+        try:
+            for iid in self.tree.get_children():
+                p = Path(iid)
+                if p.exists():
+                    ok = has_result(p)
+                    self.tree.set(iid, "status", "analyzed" if ok else "not analyzed")
+            # 同时刷新当前选中项的按钮状态
+            self._on_select()
+        except Exception:
+            pass
+
     def _load_bg_image(self):
-        """加载初音背景图并压暗，作为全窗口氛围背景。"""
+        """加载可选背景图并压暗，作为全窗口氛围背景。"""
         self._bg_photo = None
         self._bg_img_orig = None
         try:
             from PIL import Image, ImageEnhance, ImageTk
-            if MIKU_BG.exists():
-                img = Image.open(MIKU_BG).convert("RGB")
+            if BG_IMAGE.exists():
+                img = Image.open(BG_IMAGE).convert("RGB")
                 # 压暗 + 降饱和，做氛围底，避免与前景文字抢视觉
                 img = ImageEnhance.Brightness(img).enhance(0.45)
                 img = ImageEnhance.Color(img).enhance(0.85)
@@ -683,11 +842,11 @@ class App:
         tk = self.tk
         ttk = self.ttk
 
-        # 内容层（窗口主体，铺满 miku 背景图）
+        # 内容层（窗口主体，铺满可选背景图）
         self.content = tk.Frame(self.root, bg=THEME["bg"])
         self.content.pack(fill="both", expand=True)
 
-        # 背景层：miku 铺满内容层
+        # 背景层：可选背景图铺满内容层
         self.bg_label = tk.Label(self.content, bd=0)
         self.bg_label.place(x=0, y=0, relwidth=1, relheight=1)
         if self._bg_photo:
@@ -709,6 +868,14 @@ class App:
         self.btn_infer = ttk.Button(top, text="Analyze", style="Accent.TButton",
                                     command=self.infer_selected, state="disabled")
         self.btn_infer.pack(side="left", padx=4)
+
+        # 分析模型选择（仅未分析时生效：决定用 all-in-one 还是 EDMFormer）
+        self.analysis_var = tk.StringVar(value="all-in-one")
+        self.analysis_combo = ttk.Combobox(
+            top, textvariable=self.analysis_var, state="readonly", width=18,
+            values=("all-in-one", "EDMFormer"),
+        )
+        self.analysis_combo.pack(side="left", padx=4)
 
         self.btn_play = ttk.Button(top, text="Play/Pause", command=self.toggle_play, state="disabled")
         self.btn_play.pack(side="left", padx=4)
@@ -733,6 +900,8 @@ class App:
         self.tree.configure(yscrollcommand=sb.set)
         self.tree.bind("<Double-1>", lambda e: self.load_selected())
         self.tree.bind("<<TreeviewSelect>>", self._on_select)
+        # 单击列表项也触发一次状态刷新（处理「外部删除 JSON 后仍选中同一首」的情况）
+        self.tree.bind("<Button-1>", self._on_tree_click)
 
         # ---- 后处理方案勾选区（分析完成后可配置） ----
         pp = ttk.Frame(self.content, padding=(10, 4, 10, 0))
@@ -800,13 +969,24 @@ class App:
         return p if p.exists() else None
 
     def _on_select(self, event=None):
+        """选中歌曲时，实时按本地 JSON 是否存在刷新状态与按钮。
+
+        每次触发都重新检查本地结果文件（而非依赖列表缓存的旧状态），
+        这样即使结果 JSON 在外部被删除/新增，选中即能反映最新情况。
+        """
         p = self.selected_audio()
         if p is None:
             self.btn_play.config(state="disabled")
             self.btn_infer.config(state="disabled")
             return
         self.current_audio = p
-        if has_result(p):
+
+        # 实时检查本地 JSON，并同步列表该行的状态显示
+        ok = has_result(p)
+        if str(p) in self.tree.get_children():
+            self.tree.set(str(p), "status", "analyzed" if ok else "not analyzed")
+
+        if ok:
             self.btn_play.config(state="normal")
             self.btn_infer.config(state="disabled")
             self.status_var.set(f"{p.name}: analyzed, ready to play")
@@ -814,6 +994,21 @@ class App:
             self.btn_play.config(state="disabled")
             self.btn_infer.config(state="normal")
             self.status_var.set(f"{p.name}: not analyzed, analyze first")
+
+    def _on_tree_click(self, event=None):
+        """单击列表：等 selection 更新后，重新按本地 JSON 刷新选中项状态。
+
+        解决「结果 JSON 在外部被删除后，仍选中同一首歌、选中事件不触发」
+        导致的按钮状态不更新的问题。
+        """
+        def _refresh():
+            try:
+                self._on_select()
+            except Exception:
+                pass
+
+        # 延迟到点击事件处理完之后再刷新（此时 selection 已更新）
+        self.root.after(50, _refresh)
 
     def load_selected(self):
         p = self.selected_audio()
@@ -878,6 +1073,7 @@ class App:
 
         run_inference(
             p, auto_device(), self._selected_processors(),
+            analysis=("edm" if self.analysis_var.get() == "EDMFormer" else "structure"),
             progress_cb=self.status_var.set, done_cb=done,
         )
 

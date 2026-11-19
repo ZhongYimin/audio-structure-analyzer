@@ -1,5 +1,5 @@
 {
-  "path": "C:\\Users\\Stepfrog\\WorkBuddy\\2026-10-30-22-58-58\\audio_structure_analyzer\\test_audio\\dont_look_back.wav",
+  "path": "samples/pop_sample.wav",
   "bpm": 82,
   "beats": [
     0.19,
@@ -862,6 +862,7 @@
     3,
     4
   ],
+  "activation_fps": null,
   "segments": [
     {
       "start": 0.0,
@@ -939,5 +940,157 @@
       "label": "end"
     }
   ],
-  "activation_fps": null
+  "postprocess": {
+    "prechorus": {
+      "name": "prechorus",
+      "candidates": [
+        {
+          "segment_index": 2,
+          "start": 35.32,
+          "end": 52.9,
+          "label": "pre-chorus?",
+          "confidence": 1.0,
+          "reason": "shorter (18/23s), energy rise; similar to seg[6] (RMS 0.97, dur 1.00); pad thickens x1.9; harmonic shift (corr 0.28)",
+          "source": "harmonic_shift",
+          "sources": [
+            {
+              "source": "position",
+              "confidence": 0.64,
+              "reason": "shorter (18/23s), energy rise"
+            },
+            {
+              "source": "energy_match",
+              "confidence": 0.61,
+              "reason": "similar to seg[6] (RMS 0.97, dur 1.00)"
+            },
+            {
+              "source": "orchestration",
+              "confidence": 0.09,
+              "reason": "pad thickens x1.9"
+            },
+            {
+              "source": "harmonic_shift",
+              "confidence": 0.7,
+              "reason": "harmonic shift (corr 0.28)"
+            }
+          ],
+          "extra": {
+            "bass_low": [
+              7221.50341796875,
+              6001.6572265625
+            ],
+            "drums_low": [
+              6402.3916015625,
+              11359.1640625
+            ],
+            "drums_high": [
+              111.46456909179688,
+              108.34030151367188
+            ],
+            "vocals_brightness": [
+              1.2539815940980363,
+              1.030075107169301
+            ],
+            "other_mid": [
+              6664.11181640625,
+              12337.4169921875
+            ],
+            "chroma_corr": 0.27503482294098497
+          }
+        },
+        {
+          "segment_index": 6,
+          "start": 126.11,
+          "end": 143.72,
+          "label": "pre-chorus?",
+          "confidence": 1.0,
+          "reason": "shorter (18/23s), energy rise; similar to seg[2] (RMS 1.03, dur 1.00); harmonic shift (corr 0.38)",
+          "source": "energy_match",
+          "sources": [
+            {
+              "source": "position",
+              "confidence": 0.61,
+              "reason": "shorter (18/23s), energy rise"
+            },
+            {
+              "source": "energy_match",
+              "confidence": 0.64,
+              "reason": "similar to seg[2] (RMS 1.03, dur 1.00)"
+            },
+            {
+              "source": "harmonic_shift",
+              "confidence": 0.44,
+              "reason": "harmonic shift (corr 0.38)"
+            }
+          ],
+          "extra": {
+            "chroma_corr": 0.3769041892496309
+          }
+        }
+      ],
+      "meta": {
+        "criteria": [
+          "position",
+          "orchestration",
+          "harmonic_shift"
+        ],
+        "position": 2,
+        "energy_match": 2,
+        "orchestration": 1,
+        "harmonic": 2
+      }
+    },
+    "style": {
+      "name": "style",
+      "candidates": [
+        {
+          "segment_index": -1,
+          "start": 0.0,
+          "end": 287.9,
+          "label": "genre:Rock",
+          "confidence": 0.1,
+          "reason": "Rock---Alternative Rock 10%; Rock---Indie Rock 8%; Rock---Pop Rock 4%; Rock---Post Rock 4%; Rock---Surf 3%",
+          "source": "style",
+          "sources": [],
+          "extra": {
+            "genre_tags": [
+              "Rock---Alternative Rock",
+              "Rock---Indie Rock",
+              "Rock---Pop Rock",
+              "Rock---Post Rock",
+              "Rock---Surf"
+            ],
+            "genre_dist": {
+              "Rock---Alternative Rock": 0.1011,
+              "Rock---Indie Rock": 0.0764,
+              "Rock---Pop Rock": 0.0398,
+              "Rock---Post Rock": 0.0385,
+              "Rock---Surf": 0.0335
+            },
+            "main_genre": "Rock"
+          }
+        }
+      ],
+      "meta": {
+        "criteria": [
+          "maest_genre_model"
+        ],
+        "main_genre": "Rock",
+        "genre_dist": {
+          "Rock---Alternative Rock": 0.1011,
+          "Rock---Indie Rock": 0.0764,
+          "Rock---Pop Rock": 0.0398,
+          "Rock---Post Rock": 0.0385,
+          "Rock---Surf": 0.0335
+        },
+        "genre_tags": [
+          "Rock---Alternative Rock",
+          "Rock---Indie Rock",
+          "Rock---Pop Rock",
+          "Rock---Post Rock",
+          "Rock---Surf"
+        ]
+      }
+    }
+  }
 }

@@ -31,11 +31,13 @@ from .postprocess import (  # noqa: F401
     run_postprocess,
 )
 from .genre import GenreClassifier  # noqa: F401
+from .edm import EDMFormer, analyze_edm  # noqa: F401
 from .pipeline import (  # noqa: F401
     find_result,
     load_audio,
     load_bundle,
     preprocess,
+    preprocess_edm,
 )
 
 __version__ = "0.9.0"
@@ -65,10 +67,14 @@ __all__ = [
     "run_all",
     # 流水线（后端编排层）
     "preprocess",
+    "preprocess_edm",
     "load_bundle",
     "find_result",
     "load_audio",
     # 流派识别（MAEST 模型）
     "GenreClassifier",
+    # EDM 结构识别（EDMFormer 模型，外部依赖）
+    "EDMFormer",
+    "analyze_edm",
     "__version__",
 ]

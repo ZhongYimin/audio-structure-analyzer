@@ -15,7 +15,7 @@ all-in-one 基于 Demucs 声部分离 + Transformer 逐帧预测，对真实演�
     print(result.bpm, result.segments)
 
     # 或读入已有的 all-in-one JSON 结果（无需重复推理）
-    result = load_result("test_audio/allin1/guy_contact.json")
+    result = load_result("examples/sample_results/pop_structure.json")
 """
 
 from __future__ import annotations
@@ -65,8 +65,11 @@ class AnalysisResult:
     downbeats: List[float] = field(default_factory=list)
     beat_positions: List[int] = field(default_factory=list)
     segments: List[Segment] = field(default_factory=list)
+    edm_segments: List[Segment] = field(default_factory=list)
     activation_fps: Optional[float] = None
     postprocess: Dict[str, dict] = field(default_factory=dict)
+    # 分析方式：structure = all-in-one（流行标签）；edm = EDMFormer（电子结构）
+    analysis_type: str = "structure"
 
     @property
     def duration(self) -> float:
@@ -81,7 +84,10 @@ class AnalysisResult:
             "beat_positions": self.beat_positions,
             "activation_fps": self.activation_fps,
             "segments": [s.to_dict() for s in self.segments],
+            "analysis_type": self.analysis_type,
         }
+        if self.edm_segments:
+            d["edm_segments"] = [s.to_dict() for s in self.edm_segments]
         if self.postprocess:
             d["postprocess"] = self.postprocess
         return d
@@ -104,8 +110,10 @@ class AnalysisResult:
             downbeats=[float(x) for x in data.get("downbeats", [])],
             beat_positions=[int(x) for x in data.get("beat_positions", [])],
             segments=[Segment(start=s["start"], end=s["end"], label=s["label"]) for s in data["segments"]],
+            edm_segments=[Segment(start=s["start"], end=s["end"], label=s["label"]) for s in data.get("edm_segments", [])],
             activation_fps=data.get("activation_fps"),
             postprocess=data.get("postprocess", {}),
+            analysis_type=data.get("analysis_type", "structure"),
         )
 
 

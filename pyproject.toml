@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "audio-structure-analyzer"
-version = "0.2.0"
+version = "0.9.0"
 description = "Music structure / beat analysis via all-in-one (harmonix-all)"
 readme = "README.md"
 license = "MIT"

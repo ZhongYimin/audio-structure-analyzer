@@ -1,7 +1,7 @@
 """可视化播放器：展示 all-in-one 框架的分析结果（段落 + 强拍 + 拍）。
 
 用法：
-    python examples/player_allin1.py path/to/song.wav --json test_audio/allin1/guy_contact.json
+    python examples/player_allin1.py path/to/song.wav --json examples/sample_results/pop_structure.json
 
 交互：
     - 空格：暂停/继续

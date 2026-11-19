@@ -61,11 +61,15 @@ class GenreClassifier:
             return
         from transformers import pipeline
 
+        # local_files_only=True：只从本地 HF 缓存加载，不联网检查，
+        # 避免无代理环境下访问 huggingface.co 超时卡住整个分析。
+        # MAEST 模型首次分析时已下载到 ~/.cache/huggingface，此处直接复用。
         self._pipe = pipeline(
             "audio-classification",
             model=self.model_name,
             trust_remote_code=True,
             device=self.device,
+            local_files_only=True,
         )
 
     def classify(

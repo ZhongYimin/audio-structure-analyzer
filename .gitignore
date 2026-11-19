@@ -33,7 +33,7 @@ test_audio/embed/
 models/
 *.pth
 
-# --- 测试产物（保留 test_audio/allin1/*.json 参考结果） ---
+# --- 测试产物（个人音频与本地结果不入库；公开示例见 examples/sample_results/） ---
 test_audio/*.json
 test_audio/beat_alignment.png
 test_audio/guy_contact_structure.png
